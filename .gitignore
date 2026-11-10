@@ -62,3 +62,12 @@ dkms.conf
 
 # 第三方源码（gbarecomp 及其子模块，含独立 .git，按 README 第 3 节自行获取）
 /third_party/
+
+# scons 构建产物
+build_*/
+.sconsign.dblite
+rtconfig.pyc
+
+# Python 缓存
+__pycache__/
+*.pyc

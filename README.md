@@ -221,4 +221,4 @@ $env:GBARECOMP_SLIM=$null                                          # 该产物�
 |------|------|
 | Phase 0：SDK 环境 + LCD 点亮 | 已完成（串口打印 `CO5300_ReadID 0x331100`，屏幕点亮） |
 | Phase 1：PC 端重编译产出 C++ 代码 | 已完成（BIOS 735 函数 / ROM 19,804 函数 / 4.27M 行；ARM 编译零错误；体积已瘦身到装得下） |
-| Phase 2：思澈平台移植（CPU + LCD） | 未开始 |
+| Phase 2：思澈平台移植（CPU + LCD） | 进行中（2-A 工程骨架 + 2-B LCD 中央 240×160 彩条已烧录验证；2-C runtime 移植未开始） |

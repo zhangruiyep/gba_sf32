@@ -2,6 +2,21 @@
 
 > 最后更新：2026-11-10
 
+## 0. 当前状态总览
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| Phase 0 | 环境 + LCD 点亮（SDK example/lcd_fb 验证） | ✅ 完成 |
+| Phase 1 | PC 端 gbarecomp 重编译 ROM/BIOS → C++20 产物 | ✅ 完成（Mario Kart SC 4MB；8 shard；slim 后 12.68MB `.text`） |
+| Phase 2-A | 仓库根独立 scons 工程骨架 | ✅ 编译通过（`main.bin` 325,240 B） |
+| Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（已烧录，屏幕显示滚动彩条） |
+| Phase 2-C | runtime 移植到 SiFli HAL | ⏳ 方案已定，未开始 |
+| Phase 3 | 音频 / 按键 / 存档 | ⏳ 未开始 |
+
+**烧录已打通**：`sftool 0.2.5`（`C:\Users\zhang\.sifli\tools\sftool\0.2.5`）+ `build_.../uart_download.bat`，串口 COM14（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000` 写入成功，屏显滚动彩条。
+
+> **约定：后续下载烧录由用户本人执行**，AI 只负责编译并给出烧录命令。
+
 ---
 
 ## 1. 硬件确认（锁定）
@@ -420,44 +435,110 @@ gba_recompile.exe --rom "roms\Mario Kart Super Circuit (U).gba" --out out\cart_s
 
 → 瘦身方向：改 `arm_codegen.cpp` 去掉每指令 yield 检查与周期计数（保留函数级检查），预计可降到 1/3；副作用是 GBA 周期精确性下降（对大多数游戏无感），同时帧率大幅提升。
 
-### Phase 2：思澈平台移植 — CPU + LCD（4-6 天）
+### Phase 2：思澈平台移植 — CPU + LCD（进行中）
 
 **目标**：在黄山派上跑通重编译的 CPU + 画面
 
-**工程位置**：在当前项目目录下，scons 工程独立于 SDK（SDK 路径通过 SConstruct 中的变量配置）：
+**执行状态（2026-11-10）**：
+
+| 步骤 | 内容 | 状态 |
+|------|------|------|
+| 2-A | 仓库根独立 scons 工程骨架，能编出可烧录固件 | ✅ 编译通过 |
+| 2-B | 显示后端：LCD 中央 240×160 写 RGB565 彩条 | ✅ 已烧录验证（屏显滚动彩条） |
+| 2-C | runtime 移植（`src/gba/*` + `runtime_arm.cpp` + `runtime_bus_bridge.cpp` 编入工程） | ⏳ 方案已定，未开始 |
+| 2-D | 接入游戏 shard + BIOS dispatch，ROM/BIOS 放 PSRAM | ⏳ 未开始 |
+| 2-E | 按键 / 音频 / 存档 | ⏳ 未开始（Phase 3） |
+
+**工程结构（已落地，独立于 SDK 目录）**：
 
 ```
-e:\work\Github\gba_sf32\              # 当前工程根（独立于 SDK）
-├── SConstruct                         # scons 入口（配置 SDK_ROOT = "e:/work/gitee/sifli/SiFli-SDK/v2.5.1"）
-├── SConscript
-├── sdk_conf/                          # scons 配置文件
-│   ├── Kconfig.proj
-│   ├── rtconfig.py                    # board = 'sf32lb52-lchspi-ulp'
-│   └── link.ld                        # 链接脚本（调整内存布局）
+e:\work\Github\gba_sf32\
+├── SConstruct              # 抄 SDK example/lcd_fb/project 的骨架
+├── SConscript              # 先加载 <SDK>/SConscript，再加载 src/SConscript
+├── Kconfig                 # source "$SIFLI_SDK/Kconfig.v2" + rsource "Kconfig.proj"
+├── Kconfig.proj            # CUSTOM_MEM_MAP + BSP_USING_LCD_FRAMEBUFFER
+├── proj.conf               # 主线程栈/优先级、ULOG 配置
+├── rtconfig.py             # 空文件（必须存在，否则 rtconfig.LINK_SCRIPT_SRC 为 None）
 ├── src/
-│   ├── main.c                         # 应用入口
-│   ├── gba_config.h                   # GBA 内存/ROM 地址配置
-│   ├── hal_port/                      # SDK HAL 适配层
-│   │   ├── render_backend.c           # LCDC + 帧缓冲 blit
-│   │   ├── audio_backend.c            # AUDCODEC DAC + DMA
-│   │   ├── input_backend.c            # GPIO KEY1/KEY2
-│   │   ├── time_backend.c             # Cortex-M33 DWT cycle counter
-│   │   └── storage_backend.c           # HAL FLASH 读写
-│   └── gbarecomp/                     # Phase 1 产出的 C 代码（整份拷贝）
-│       ├── bios/
-│       ├── game/
-│       └── runtime/
-└── plan/gba_hsp_plan.md
-
-构建命令: cd e:\work\Github\gba_sf32 && scons --board=sf32lb52-lchspi-ulp -j8
+│   ├── SConscript          # DefineGroup('gba_app', ['main.c'])
+│   └── main.c              # 显示后端验证（L1 放 240×160 帧存，L2 放全屏帧存）
+├── plan/gba_hsp_plan.md
+├── README.md
+└── third_party/gbarecomp-main/   # 生成器源码（.gitignore 忽略，不入库）
 ```
 
-**SConstruct 中的 SDK 路径配置**（示意）：
-```python
-# SConstruct 顶部
-SDK_ROOT = os.environ.get('SIFLI_SDK_ROOT', 'e:/work/gitee/sifli/SiFli-SDK/v2.5.1')
-# 后续引用 SDK 下的 drivers、rtos、customer/boards 等路径
+构建命令（在仓库根执行，路径盘符建议大写）：
+
+```powershell
+scons --board=sf32lb52-lchspi-ulp -j8
 ```
+
+产物：`build_sf32lb52-lchspi-ulp_hcpu/`（`main.bin`、`bootloader/`、`ftab/`、`ImgBurnList.ini`、`sftool_param.json`、`uart_download.bat`）
+
+**2-A/2-B 实测结果**：
+
+| 项 | 值 |
+|------|------|
+| 编译结果 | 成功，无 warning 阻断 |
+| `main.bin` | 325,240 B |
+| ROM 占用 | 354 KB / 8 MB |
+| RAM 占用 | 133,980 B / 512 KB（全屏帧存放在 PSRAM，不计入 L1） |
+| 烧录镜像 | 3 个：bootloader@0x12010000、main@0x12020000、ftab@0x12000000 |
+
+`main.c` 当前实现：L1 段（片上 SRAM）放 240×160 RGB565 帧存并逐帧生成滚动彩条 + 中心黑方块；L2 段（OPI-PSRAM）放 390×450 全屏帧存并用 `drv_lcd_fb_write_send()` 只刷新中央 (75,145)-(314,304) 区域；串口每秒打印 `display: N fps`。
+
+**构建环境（不走 `set_env.bat` 交互式 ConEmu 时）**：
+
+| 变量 | 值 |
+|------|-----|
+| `SIFLI_SDK` | `<SDK>/` |
+| `ENV_ROOT` / `ENV_VER` | `D:\sifli\env` / `1.2.0` |
+| `RTT_CC` | `gcc`（不设会让 `GetLinkScript` 返回 None） |
+| `RTT_EXEC_PATH` | `D:\sifli\env\tools\gnu_gcc\arm_gcc_14.2.1\bin` |
+| `PYTHONHOME` | `D:\sifli\env\tools\python-3.11.9-amd64` |
+| `PYTHONPATH` | `<PYTHONHOME>;<SDK>\tools\build;<SDK>\tools\build\default` |
+| SCons | 必须用 `%PYTHONHOME%\Scripts\scons.exe`（PATH 里若有 Python2.7 版 scons 会报错） |
+
+**Phase 2 新踩的坑**：
+
+1. `rtconfig.py` 必须是空文件但**必须存在**，否则 `rtconfig.LINK_SCRIPT_SRC` 为 `None`，链接阶段抛 `AttributeError`。
+2. `drv_lcd_fb_send()` 在本 SDK 只有声明没有实现，链接期 `undefined reference`；初始清屏改用 `drv_lcd_fb_write_send()`。
+3. `write_area` 与 `src_area` 处在**同一个绝对坐标空间**，只刷新中央区域时两者都要按屏幕坐标裁剪，`src` 指针仍指向整帧缓冲起点。
+4. 工程路径盘符必须大写 `E:`（小写会让 board 源文件被重复加入，报 `multiple definition of bsp_init`）。
+
+**烧录结果（2026-11-10，已解决）**
+
+- 失败经历：`ImgDownUart.exe` 在 `downloadfile bootloader` 处 3 秒超时；`sftool` 早期报 `Error reading frame start marker / Failed to connect to the chip`，根因是板子当时未进入 UART 下载模式，不是工具问题。
+- 最终可用命令：在 `build_sf32lb52-lchspi-ulp_hcpu/` 下执行 `uart_download.bat`，输入端口号 `14`，其内部等价命令为：
+  ```
+  sftool -p COM14 -c SF32LB52 -m nor write_flash "bootloader\bootloader.bin@0x12010000" "main.bin@0x12020000" "ftab\ftab.bin@0x12000000"
+  ```
+- `sftool` 位置：`C:\Users\zhang\.sifli\tools\sftool\0.2.5\sftool.exe`（需在 PATH 中），参数取自同目录 `sftool_param.json`（`chip=SF32LB52`、`memory=NOR`）。
+- 验证：烧录后屏幕显示中央 240×160 滚动彩条，Phase 2-B 通过。
+
+**2-C runtime 移植方案（已调研确认）**：
+
+gbarecomp 的 PC 宿主层不能直接用：`runtime.cpp`（246KB）主循环里用 `std::thread`，`host_window.cpp` 是 SDL 后端。设备端只复制"纯逻辑层"：
+
+| 可整段复用 | 说明 |
+|------------|------|
+| `src/gba/*.cpp` | CPU/PPU/APU/DMA/IO/卡带 |
+| `src/armv4t/runtime_arm.cpp` | 重编译代码的 dispatch 主体（需 stub `overlay_try_dispatch`） |
+| `src/runtime/runtime_bus_bridge.cpp` | 总线桥接，自身已实现 `runtime_tick` |
+| `tools/test_rom_runner/main.cpp` | 宿主层模板（约 70 行） |
+
+不链接：`runtime.cpp`、`host_window.cpp`、`host_platform.cpp`、`launcher_seam.h`、`diagnostic_replay`、`overlay_loader`、`mod_*`、`multiplayer_*`、`tcp_debug_server`、`asset_picker`、`mobile_platform`。
+
+设备端宿主层要提供：
+
+1. `gbarecomp::set_active_bus()` / `set_active_ppu()` 绑定
+2. `int overlay_try_dispatch(...)` → 恒返回 0
+3. `runtime_dispatch_miss` / `runtime_unimplemented_*` / `runtime_force_interp_step` → abort（便于暴露未覆盖指令）
+4. `runtime_set_frame_present_hook(std::function<bool()>)`：在 `runtime_should_yield` 的 VBlank 分支就地回调，主线程只调用一次 `runtime_dispatch(0x08000000)`，永不返回
+5. present 回调里 `ppu.latched_framebuffer()` → RGB888（stride = `render_width()*3`）转 RGB565 写入 LCD
+6. `bus.io().set_keyinput(uint16_t)` 喂 GPIO 按键
+
+需要打补丁的地方：`runtime_bus_bridge.cpp:33` 的 `<thread>` 采样线程（`GBARECOMP_SAMPLE` 门控）、`runtime_arm.cpp:58/:1077` 的 overlay_loader 依赖、`runtime_arm_default_aborts.cpp:52/:67` 的 `<filesystem>` / `<unistd.h>`。`reset_recomp_cpu` 是 `runtime.cpp:1236` 的 file-static，不可链接，需照抄（PC/R13/banked_sp/cpsr）。
 
 **关键实现**：
 
@@ -537,14 +618,14 @@ void gba_frame_wait(uint32_t start_cycles) {
 
 #### 3.2.3 Phase 2 验证清单
 
-| # | 验证点 | 通过标准 |
-|---|--------|---------|
-| 2.1 | LCD 屏幕点亮 | 全黑背景 390×450 |
-| 2.2 | 居中区域可写 | 中央 240×160 显示测试色块 |
-| 2.3 | CPU 跑通 BIOS | 串口打印 BIOS 初始化日志 |
-| 2.4 | PPU 软渲染输出 | GBA 画面正确显示在居中区域 |
-| 2.5 | 颜色格式正确 | BGR555 → RGB565 颜色无偏差 |
-| 2.6 | 跑通游戏标题画面 | Pokemon FireRed 标题显示 |
+| # | 验证点 | 通过标准 | 状态 |
+|---|--------|---------|------|
+| 2.1 | LCD 屏幕点亮 | 全黑背景 390×450 | ✅ 通过 |
+| 2.2 | 居中区域可写 | 中央 240×160 显示测试色块 | ✅ 通过（滚动彩条） |
+| 2.3 | CPU 跑通 BIOS | 串口打印 BIOS 初始化日志 | ⏳ 未开始 |
+| 2.4 | PPU 软渲染输出 | GBA 画面正确显示在居中区域 | ⏳ 未开始 |
+| 2.5 | 颜色格式正确 | BGR555 → RGB565 颜色无偏差 | ⏳ 未开始 |
+| 2.6 | 跑通游戏标题画面 | Mario Kart Super Circuit 标题显示 | ⏳ 未开始 |
 
 ### Phase 3：音频 + 输入 + 保存（3-4 天）
 
