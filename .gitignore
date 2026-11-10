@@ -53,3 +53,12 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# 重编译生成产物（体积巨大，可随时重新生成）
+/out/
+
+# GBA BIOS / ROM 素材（有版权，不入库）
+/roms/
+
+# 第三方源码（gbarecomp 及其子模块，含独立 .git，按 README 第 3 节自行获取）
+/third_party/

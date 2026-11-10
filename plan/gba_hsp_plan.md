@@ -229,32 +229,196 @@ GBA ROM ──▶ gbarecomp ──▶ C 代码 ──▶ arm-none-eabi-gcc ─�
 - `e:\work\gitee\sifli\SiFli-SDK\v2.5.1\example\lcd_fb\src\main.c` — 帧缓冲操作完整示例
 - `e:\work\gitee\sifli\SiFli-SDK\v2.5.1\customer\boards\sf32lb52-lchspi-ulp\hcpu\board.conf` — 已预配置 LCD/音频/GPIO
 
-### Phase 1：PC 端 — gbarecomp 重编译产出 C 代码（1 天）
+**执行结果（2026-11-10，已完成）**：
 
-> **为什么不跳过**：gbarecomp 是 Rust 命令行工具，必须在 PC 上跑（目标板 Cortex-M33 没有 Rust 工具链）。这一步只是"在 PC 上跑工具生成代码"，**不是在 PC 上运行模拟器**。
+| 项 | 结果 |
+|------|------|
+| 编译环境 | `D:\sifli\env`（ENV_VER=1.2.0），arm-none-eabi-gcc 14.2.1，SCons 4.9.1 |
+| 验证示例 | `example/lcd_fb`（帧缓冲全屏色块轮换，跑 40s 后退出） |
+| 构建命令 | `example/lcd_fb/project` 下 `scons --board=sf32lb52-lchspi-ulp -j8` |
+| 产物 | `build_sf32lb52-lchspi-ulp_hcpu/main.bin` 326KB（ROM 354KB/8MB，RAM 232KB/512KB） |
+| 烧录命令 | `tools/uart_download/ImgDownUart.exe --port COM14 --baund 1000000 --device SF32LB52X_NOR --file ImgBurnList.ini` |
+| 验证结果 | 串口 1Mbps 日志：`CO5300_ReadID 0x331100` → `Found lcd co5300` → `drv_lcd_fb_init done` → `display on`，屏幕点亮 |
+
+**踩坑（务必记住）**：命令行里的路径盘符必须大写 `E:`。用小写 `e:` 会让 `customer/boards/SConscript` 的路径包含判断失效，board 源文件被重复加入，bootloader 链接报 `multiple definition of bsp_init`。
+
+**不走 `set_env.bat`（ConEmu 交互式）时的等价环境变量**：`ENV_ROOT=D:\sifli\env`、`ENV_VER=1.2.0`、`RTT_CC=gcc`、`RTT_EXEC_PATH=D:\sifli\env\tools\gnu_gcc\arm_gcc_14.2.1\bin`、`PYTHONHOME=D:\sifli\env\tools\python-3.11.9-amd64`、`PYTHONPATH=<PYTHONHOME>;<SDK>\tools\build;<SDK>\tools\build\default`、`SIFLI_SDK=<SDK>/`、`SIFLI_SDK_PATH=<SDK>/`、`PATH` 追加 gcc/Python/Scripts/menuconfig/dist/tools\scripts、`LEGACY_ENV=1`。
+
+**未完成**：第 5 步性能基线放到 Phase 2，用真实 PPU 渲染路径测比 CoreMark 更有决策价值。
+
+### Phase 1：PC 端 — gbarecomp 重编译产出 C++ 代码（1 天）
+
+> **为什么不跳过**：`gba_recompile` 必须在 PC 上跑（目标板 Cortex-M33 没有对应的生成器工具链）。这一步只是"在 PC 上跑工具生成代码"，**不是在 PC 上运行模拟器**。
 >
 > **砍掉了什么**：原版 Phase 1 的"在 PC 上编译运行 + 替换 SDL 后端为 headless stub" — 这部分跳过。SDL 后端直接替换为思澈 SDK HAL 后端（Phase 2 做）。
 
-**目标**：把 Pokemon FireRed ROM 重编译成 C 代码产物
+**目标**：把 Pokemon FireRed ROM 重编译成 **C++20** 代码产物
+
+**构建方式修正（2026-11-10 实测，之前认知有误）**：
+- gbarecomp **不是** Rust CLI，**不用 cargo**。`gba_recompile` 是 CMake 项目里的一个 target，工具链是 **MSVC（VS2022/2026）+ Ninja**
+- 生成物是 **C++20**（`*.cpp/.h`），runtime 在 `src/gba/*.cpp`、`src/armv4t/*.cpp`
+- 三个子模块必须 checkout 到 **pin 的 commit**（不是 master）：
+  - `arm-recomp-core` = `63dd32dd210a8bf18bbd11933393a7b87f9b3bf6`
+  - `rbengine` = `2a03e73693acee0fb78076ea058642c931bef12e`
+  - `recomp-net` = `8c76fb643339144a3a84d5ba8f5defe6250dcd26`
+
+**构建命令（已验证可产出 `build/gba_recompile.exe`）**：
+```powershell
+# VS DevShell（cmake 3.30.2 没有 VS2026 生成器，必须用 Ninja）
+Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64'
+cmake -S <repo> -B <repo>\build -G Ninja `
+  -DGBARECOMP_TOMLPP_INCLUDE_DIR=<...>\third_party\tomlpp-src `
+  "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc /utf-8" `
+  "-DCMAKE_C_FLAGS=/DWIN32 /D_WINDOWS /utf-8"
+cmake --build <repo>\build --target gba_recompile --parallel 16
+```
+
+**两个必踩的坑（务必记住）**：
+1. **必须加 `/utf-8`**：源码是 UTF-8 无 BOM，本机 MSVC 默认按代码页 936 解析，`condition_codes.h` 里的 `≥/≤` 注释会把后面的 `GE/LT/AL` 枚举名吃掉，报一堆莫名的 `error C2838: 'GE': illegal qualified name in member declaration`
+2. **子模块必须用 pin 的 commit**：用 master 会缺 `ArmCodegen::supports_native_region` / `CodegenCtx::native_region`，编译报 C2039
+   （github.com 直连不可用时，用 `api.github.com` 查 pin 的 SHA，再用 `codeload.github.com/<owner>/<repo>/tar.gz/<sha>` 下 tar 包）
 
 **步骤**：
-1. 安装 Rust：`rustup default stable`
-2. `git clone https://github.com/mstan/gbarecomp.git` + 依赖仓库
-3. `cargo build --release` 构建 gbarecomp CLI
-4. 准备合法的 GBA BIOS dump (`gba_bios.bin`) 和 ROM (`PokemonFireRed.gba`, ~5MB, SHA-1: `41cb23d8dccc8ebd7c649cd8fbb58eeace6e2fdc`)
-5. 执行重编译（参考 FireRedLeafGreenRecomp README）:
-   ```
-   gba_recompile --rom PokemonFireRed.gba \
-                 --config variants/firered/symbols/firered.toml \
-                 --out variants/firered/generated
-   ```
-6. **分析输出**（必须做，这是决定后续移植策略的关键）:
-   - 产物目录结构：generated/src/ 下有哪些 C 文件？game 代码 + runtime 分别在哪？
-   - C 还是 C++？（文件后缀是 .c 还是 .cpp？有没有用到 C++ 特性？）
-   - 有没有 Cortex-M33 不兼容代码？（内联汇编、编译器特定 attribute、SWP/CP15 指令）
-   - 代码总量：C 文件行数、文件数量、总大小（决定 PSRAM/Flash 分配）
-   - 有没有依赖 C++ STL？（如果有需要在 SDK scons 里开 C++ 支持）
-7. 把产物拷贝到 `e:\work\Github\gba_sf32\src\gbarecomp\`
+1. ~~安装 Rust~~ 已装（rustup 1.99.1），但本路线实际不需要
+2. 源码 + 子模块就位（`third_party/gbarecomp-main`），CMake 构建已通过 → `build/gba_recompile.exe`
+3. 准备 ROM/BIOS → 见下方执行结果（实际用 Mario Kart Super Circuit 4MB + 标准 BIOS）
+4. 执行重编译 → BIOS 与 ROM 均成功
+5. 分析产物 → C++20 / 无内联汇编 / 无 STL，但**代码体积是 ROM 的约 4 倍**
+6. 把产物拷贝到 `e:\work\Github\gba_sf32\src\gbarecomp\`（Phase 2 做）
+
+**执行结果（2026-11-10，已完成）**：
+
+输入素材（`e:\work\Github\gba_sf32\roms\`）：
+
+| 文件 | 大小 | SHA-1 | 说明 |
+|------|------|-------|------|
+| `gba_bios.bin` | 16,384 B | `300C20DF6731A33952DED8C436F7F186D25D3492` | 标准 GBA BIOS |
+| `Mario Kart Super Circuit (U).gba` | 4,194,304 B | `9D327C030C3E2D9007990518594F70C3340AC56F` | 4MB，ROM 头校验通过（Title `MARIO KART`、GameCode `AMKE`、HeaderCRC 0x08 匹配） |
+
+> 注：Pokemon FireRed 解压后 16MB，仅 ROM 镜像就超预算，改用它验证；4MB 的 Mario Kart Super Circuit 更贴近硬件上限。
+
+**BIOS 重编译**（`out/bios/`，用仓库自带 `bios/gba_bios.toml`）：
+
+```
+==> BIOS mode: rom_base=0x00000000 size=16384 seeds=3
+==> discovered 735 functions (arm=97 thumb=638 indirect=361 undefined=0 branch_targets=3133)
+```
+产物：`bios_recompiled.cpp` 3.39MB / `bios_recompiled.h` 37.7KB / `bios_dispatch_table.cpp` 202KB / `bios_symbol_map.cpp` 28.4KB
+
+**ROM 重编译**（`out/cart/`）：
+
+```
+==> discovered 19804 functions (arm=28 thumb=19776 indirect=6172 undefined=52 branch_targets=193880)
+==> codegen shards: 8 (adaptive)
+elapsed: 9.4s
+```
+
+| 项 | 值 |
+|------|------|
+| 函数数 | 19,804（ARM 28 / Thumb 19,776） |
+| 分片 | 8 个 shard + `recompiled.h` + `dispatch_table.cpp` + `symbol_map.cpp` |
+| 源码总行数 | 4,269,662 行（平均 216 行/函数） |
+| 源码总大小 | ~157MB（单 shard 17.9-23.2MB） |
+| 生成耗时 | 9.4 秒 |
+
+**产物兼容性结论**（回答原「分析输出」清单）：
+
+| 问题 | 答案 |
+|------|------|
+| 产物目录结构 | 纯游戏代码，无 runtime：`recompiled_00N.cpp`（函数体）+ `dispatch_table.cpp`（地址→函数指针表）+ `symbol_map.cpp` + `recompiled.h`。runtime 在仓库 `src/gba/`、`src/armv4t/`，需另行移植 |
+| C 还是 C++ | **C++20**（`.cpp`），但语法上是"C 风格的 C++"：只用结构体+全局变量，无类模板 |
+| Cortex-M33 不兼容代码 | **无内联汇编、无 SWP/CP15、无编译器特定 attribute**。全目录 `grep __asm\|asm volatile\|std::` 仅命中 2 处 `#include <cstdint>` |
+| C++ STL 依赖 | **无**（唯一标准库依赖是 `<cstdint>`） |
+| 代码总量 | 见下方"代码膨胀"——**这是当前最大阻塞点** |
+
+**ARM 编译验证（关键实测）**：
+
+用 `arm-none-eabi-g++ 14.2.1 -std=c++20 -Os -mcpu=cortex-m33 -mthumb -fno-exceptions -fno-rtti -fno-threadsafe-statics` 编译 `recompiled_000.cpp`（482k 行）：
+
+| 项 | 值 |
+|------|------|
+| 编译耗时 | 49.9 秒（单文件！） |
+| 错误 | **0** |
+| `shard0.o` 文件大小 | 3.23 MB |
+| `.text` 段 | 1,987,696 B |
+| shard0 函数数 | 2,484 |
+| **每函数平均代码量** | **800 B** |
+
+**代码膨胀实测（阻塞点，8 个 shard 全部编译，非推算）**：
+
+全部 8 个 shard 用 `-Os -mcpu=cortex-m33 -mthumb` 编译（8 个并行任务，总耗时 110.9s），`.text` 逐个统计：
+
+| shard | `.text` (B) |
+|------|------|
+| recompiled_000 | 1,987,696 |
+| recompiled_001 | 2,611,604 |
+| recompiled_002 | 1,953,384 |
+| recompiled_003 | 2,042,640 |
+| recompiled_004 | 2,464,900 |
+| recompiled_005 | 2,021,540 |
+| recompiled_006 | 2,015,396 |
+| recompiled_007 | 1,885,016 |
+| **合计** | **16,982,176（16.2MB）** |
+
+再加 BIOS 重编译代码（735 函数，预计 ~0.6MB）→ **约 17.6MB ARM `.text`**。
+
+硬件预算：
+
+| 项 | 大小 |
+|------|------|
+| QSPI NOR 总容量 | 16MB（需扣除 bootloader ~200KB） |
+| 重编译代码需求 | **~17.6MB** |
+| ROM 镜像（运行期必需） | 4MB（可放 PSRAM） |
+| **差额** | **NOR 超出约 2MB** |
+
+结论：**原始生成代码装不下**，需瘦身。
+
+补充实测：`-Oz` 与 `-Os` 产出的 `.text` **完全相同**（1,987,696 B，同 shard），说明膨胀不是优化等级问题，而是生成代码的结构性问题。
+
+**代码瘦身结果（2026-11-10，已实施并验证）**：
+
+改动点：`external/arm-recomp-core/profiles/armv4t_gba/arm_codegen.cpp` 增加环境变量开关 `GBARECOMP_SLIM`，打开后**去掉每指令的 `runtime_should_yield()` 和 `g_runtime_insn_trace` 两个检查**（控制流跳转仍会 `return` 回 dispatch 循环，runtime 仍有机会让出 CPU）。
+
+| 指标 | 原始 | slim | 降幅 |
+|------|------|------|------|
+| shard0 `.text` | 1,987,696 | 1,480,892 | -25.5% |
+| 8 shard 合计 `.text` | 16,982,176 | **12,675,432** | -25.4% |
+| shard0 源码行数 | 481,993 | 432,762 | -10.2% |
+| 单 shard 编译耗时 | 49.9s | 37.9s | -24% |
+
+最终固件体积预算：
+
+| 项 | 大小 |
+|------|------|
+| 游戏代码（slim，8 shard） | 12.09MB |
+| BIOS 重编译（实测 `.text`） | 0.35MB（slim 后约 0.27MB） |
+| runtime（CPU/PPU/APU/DMA，估算） | 0.5-1MB |
+| **合计** | **约 13.0-13.6MB** |
+| NOR 扣 bootloader 后可用 | 约 15.7MB |
+| **余量** | **约 2MB** ✅ 放得下 |
+
+ROM 镜像 4MB 放 PSRAM（8MB），不占 NOR。
+
+重新编译尺寸的完整命令（8 并行，69.4s）：
+
+```powershell
+$env:GBARECOMP_SLIM="1"
+gba_recompile.exe --rom "roms\Mario Kart Super Circuit (U).gba" --out out\cart_slim
+# 然后每个 shard 用 arm-none-eabi-g++ -std=c++20 -Os -mcpu=cortex-m33 -mthumb \
+#   -fno-exceptions -fno-rtti -fno-threadsafe-statics -c 编译
+```
+
+⚠️ 语义影响：每指令 yield 检查被移除后，抢占粒度变粗（只在实际分支/函数返回时让出）。周期计数 `runtime_tick` 仍然保留在每条指令，所以**时序精度不变**，只是 IRQ/音频的响应延迟从"每指令"变成"每控制流跳转"。对绝大多数游戏无影响，但需要在 hardware 上实测确认。
+
+**膨胀根因**（已定位到 generator 源码 `external/arm-recomp-core/profiles/armv4t_gba/arm_codegen.cpp`）：
+
+1. 每条 guest 指令一个 `{ }` 块，块首无条件插入 `if (runtime_should_yield()) return;`（第 1555/1700 行）
+2. 每条指令维护 `_cyc_XXXXXXXX` 周期累加变量，读 `g_runtime_waits.s32[8]`（第 184/195 行）
+3. 每条指令写 `g_cpu.R[15] = <next_pc>`
+4. 这三项都是**硬编码，无编译开关**
+
+→ 瘦身方向：改 `arm_codegen.cpp` 去掉每指令 yield 检查与周期计数（保留函数级检查），预计可降到 1/3；副作用是 GBA 周期精确性下降（对大多数游戏无感），同时帧率大幅提升。
 
 ### Phase 2：思澈平台移植 — CPU + LCD（4-6 天）
 
@@ -548,6 +712,7 @@ uint16_t input_read_keypad(void) {
 
 | 风险 | 概率 | 影响 | 处理 |
 |------|------|------|------|
+| **【已解决】重编译代码体积 ≈ ROM 的 4 倍** | 已发生 | 高 | 原始 16.98MB 装不下；用 `GBARECOMP_SLIM` 去掉每指令 yield/trace 检查后降到 **12.68MB**，加 BIOS/runtime 约 13.6MB，NOR 余量约 2MB |
 | gbarecomp C 代码在 Cortex-M33 效率不够 | 中 | 高 | 先测实际 CPU 占用；必要时改用 rt-thread 线程调度 / 降低帧率 |
 | PPU 软渲染帧率不够 60fps | 中 | 高 | Tile 预解码 → DSP SIMD → ePicasso GPU |
 | 游戏 ROM > 8MB 放 NOR 装不下 | 低 | 中 | 自动切 TF 卡方案 |
