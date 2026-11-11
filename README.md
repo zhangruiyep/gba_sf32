@@ -206,3 +206,18 @@ bool slim_mode() {
 - 生成器改动在子模块里（`external/*`），主仓库只会看到子模块指针变化。
 - ROM 镜像放 PSRAM（8MB），不占 NOR；超过 8MB 的 ROM 需要走 TF 卡按需加载。
 - 子模块来源的代码是 C++20，只用 `<cstdint>`，无 STL、无内联汇编，可直接用 `arm-none-eabi-g++` 编译。
+- 设备端必须让**全局** `CXXFLAGS` 带 `-std=c++20 -fexceptions -funwind-tables`：runtime 用 `throw` 退出 dispatch 循环，而 SDK 默认 `-fno-exceptions`。`SConstruct` 已在 `SifliEnv()` 后追加，`DefineGroup` 的局部 flags 只对 C 生效，改不回来。
+- 设备端的功能开关（包括对第三方代码的宏控）都做成 Kconfig 选项：符号在 `Kconfig.proj` 的 `GBARECOMP runtime` 菜单里，默认值写在 `proj.conf`，需要时用 `scons --menuconfig` 改。当前 6 个选项：
+
+  | 选项 | 默认 | 作用 |
+  |------|------|------|
+  | `GBARECOMP_COMPACT_FRAMEBUFFER` | y | 帧存改 240×160 `std::array`，不建 1280×864 宿主视图 |
+  | `GBARECOMP_NO_HOST_SAMPLER` | y | 去掉 `std::thread` 采样线程 |
+  | `GBARECOMP_SMALL_TRACE_RING` | y | trace ring 4096 → 64 条（省 288KB `.bss`） |
+  | `GBARECOMP_NO_HANG_TRACE_DUMP` | y | 去掉 hang dump 的 4096×72B ring（再省 288KB） |
+  | `GBARECOMP_PSRAM_ALLOC` | y | 大块冷缓冲从 PSRAM arena 分配 |
+  | `GBARECOMP_SMALL_AUDIO_CAPTURE` | n | 采集环 262144 → 1024 条；无 PSRAM 的板子才需要打开 |
+
+  gbarecomp 源码不 include `rtconfig.h`，所以 `src/SConscript` 用 `GetDepend()` 读出这些开关再映射成 `CPPDEFINES`，构建时会打印 `[gba] runtime features: ...`。更新 `third_party/gbarecomp-main` 后若这些宏分支不存在，链接会报 `region 'RAM' overflowed`。
+- 大块、低频访问的运行期缓冲放 PSRAM：`src/gba_psram.c` 用 `L2_NON_RET_BSS` 静态预留 4MB arena（`0x60xxxxxx`）并提供 bump 分配器；`GBARECOMP_PSRAM_ALLOC` 打开后，`GbaAudio` 的采集环（262144 × 14 B ≈ 3.5MB）从这个 arena 分配，不再挤占约 320KB 的片上堆。片上堆只留给访问频繁的小缓冲（音频输出 ring、BIOS、临时对象）。两种分配启动时都会打印用量，便于判断是否放错位置。
+- BIOS 由 `src/SConscript` 在构建时转成 C 数组（`out/gen/gba_bios_blob.c`），因此 `roms/gba_bios.bin` 必须在编译前就位。

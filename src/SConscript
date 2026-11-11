@@ -1,11 +1,108 @@
+import os
+import glob
+
 Import('rtconfig')
 from building import *
 
 cwd = GetCurrentDir()
-src = ['main.c']
+root = os.path.normpath(os.path.join(cwd, '..'))
+gbarecomp = os.path.join(root, 'third_party', 'gbarecomp-main')
+gbarecomp_src = os.path.join(gbarecomp, 'src')
 
-CPPPATH = [cwd]
+# ── Guest BIOS image as a C array ────────────────────────────────────────
+# The BIOS is part of the address space the runtime executes from, so it is
+# baked into the firmware. Regenerated only when the image changes, so an
+# unchanged blob does not force a recompile on every build.
+gen_dir = os.path.join(root, 'out', 'gen')
+gen_c = os.path.join(gen_dir, 'gba_bios_blob.c')
+bios_bin = os.path.join(root, 'roms', 'gba_bios.bin')
 
-group = DefineGroup('gba_app', src, depend = [''], CPPPATH = CPPPATH)
+if os.path.isfile(bios_bin):
+    with open(bios_bin, 'rb') as f:
+        image = f.read()
+
+    lines = ['/* AUTO-GENERATED from roms/gba_bios.bin. DO NOT EDIT. */',
+             '#include <stdint.h>',
+             '',
+             'const uint8_t g_gba_bios_blob[] = {']
+    for i in range(0, len(image), 16):
+        lines.append('  ' + ','.join('0x%02x' % b for b in image[i:i + 16]) + ',')
+    lines.append('};')
+    lines.append('const uint32_t g_gba_bios_blob_size = %du;' % len(image))
+    text = '\n'.join(lines) + '\n'
+
+    old_text = None
+    if os.path.isfile(gen_c):
+        with open(gen_c, 'r') as f:
+            old_text = f.read()
+    if old_text != text:
+        if not os.path.isdir(gen_dir):
+            os.makedirs(gen_dir)
+        with open(gen_c, 'w') as f:
+            f.write(text)
+else:
+    print('warning: %s missing, BIOS will not boot' % bios_bin)
+
+# gbarecomp feature switches. They live in Kconfig.proj (menuconfig) and are
+# mirrored into CPPDEFINES here because the third_party sources never include
+# rtconfig.h. Each switch guards a #ifdef branch added to gbarecomp:
+#   COMPACT_FRAMEBUFFER  inline 240x160 framebuffers instead of 1280x864 views
+#   NO_HOST_SAMPLER      drop the std::thread profiling sampler
+#   SMALL_TRACE_RING     4096 -> 64 trace entries (saves 288 KiB of .bss)
+#   NO_HANG_TRACE_DUMP   drop the hang-dump ring and CSV export (288 KiB more)
+#   SMALL_AUDIO_CAPTURE  audio capture ring 262144 -> 1024 entries
+#   PSRAM_ALLOC          serve large cold buffers from src/gba_psram.c
+runtime_features = [
+    'GBARECOMP_COMPACT_FRAMEBUFFER',
+    'GBARECOMP_NO_HOST_SAMPLER',
+    'GBARECOMP_SMALL_TRACE_RING',
+    'GBARECOMP_NO_HANG_TRACE_DUMP',
+    'GBARECOMP_SMALL_AUDIO_CAPTURE',
+    'GBARECOMP_PSRAM_ALLOC',
+]
+
+
+def feature_enabled(name):
+    # GetDepend() keys come from .config; accept both spellings so a Kconfig
+    # symbol rename cannot silently drop every switch.
+    return bool(GetDepend(name) or GetDepend('CONFIG_' + name))
+
+
+runtime_cppdefines = [name for name in runtime_features if feature_enabled(name)]
+print('[gba] runtime features: %s' % (' '.join(runtime_cppdefines) or '(none)'))
+
+# ── Host/device application layer ────────────────────────────────────────
+app_src = ['main.c', 'gba_device.cpp', 'gba_device_stubs.cpp', 'gba_psram.c']
+if os.path.isfile(gen_c):
+    app_src.append(gen_c)
+
+app_cpppath = [cwd, gen_dir]
+
+group = DefineGroup('gba_app', app_src, depend=[''], CPPPATH=app_cpppath,
+                    CPPDEFINES=runtime_cppdefines)
+
+# ── gbarecomp runtime (GBA machine + ARM recompiled BIOS) ────────────────
+runtime_src = sorted(glob.glob(os.path.join(gbarecomp_src, 'gba', '*.cpp')))
+runtime_src += [
+    os.path.join(gbarecomp_src, 'armv4t', 'runtime_arm.cpp'),
+    os.path.join(gbarecomp_src, 'armv4t', 'symbol_lookup.cpp'),
+    os.path.join(gbarecomp_src, 'runtime', 'runtime_bus_bridge.cpp'),
+    os.path.join(gbarecomp_src, 'runtime', 'mod_function_hooks.cpp'),
+    os.path.join(root, 'out', 'bios', 'bios_recompiled.cpp'),
+    os.path.join(root, 'out', 'bios', 'bios_dispatch_table.cpp'),
+]
+
+runtime_cpppath = [
+    gbarecomp_src,
+    os.path.join(gbarecomp_src, 'gba'),
+    os.path.join(gbarecomp_src, 'armv4t'),
+    os.path.join(gbarecomp_src, 'runtime'),
+    os.path.join(gbarecomp_src, 'debug'),
+    os.path.join(gbarecomp, 'external', 'arm-recomp-core', 'profiles', 'armv4t_gba'),
+    os.path.join(root, 'out', 'bios'),
+]
+
+group += DefineGroup('gba_runtime', runtime_src, depend=[''], CPPPATH=runtime_cpppath,
+                     CPPDEFINES=runtime_cppdefines)
 
 Return('group')

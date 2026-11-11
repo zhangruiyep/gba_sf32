@@ -6,3 +6,52 @@ config CUSTOM_MEM_MAP
 
 
 select BSP_USING_LCD_FRAMEBUFFER
+
+menu "GBARECOMP runtime"
+
+config GBARECOMP_COMPACT_FRAMEBUFFER
+    bool "Compact 240x160 framebuffers (device build)"
+    default y
+    help
+      Compile the two GBA framebuffers into GbaPpu as 240x160 std::array
+      instead of allocating the host 1280x864 views on the heap.
+      Requires the GBARECOMP_COMPACT_FRAMEBUFFER branch in gba_ppu.h.
+
+config GBARECOMP_NO_HOST_SAMPLER
+    bool "Disable the host profiling sampler"
+    default y
+    help
+      Drop the std::thread sampler in runtime_bus_bridge.cpp; neither the
+      thread nor its stack is needed on the target.
+
+config GBARECOMP_SMALL_TRACE_RING
+    bool "Shrink the runtime trace ring to 64 entries"
+    default y
+    help
+      The 4096-entry RuntimeTraceEntry ring costs 288 KiB of .bss. The
+      device keeps a 64-entry tail instead.
+
+config GBARECOMP_NO_HANG_TRACE_DUMP
+    bool "Disable the host hang-dump trace export"
+    default y
+    help
+      Drop another 4096 x 72 B static ring plus the CSV export that the
+      host writes when it detects a hang.
+
+config GBARECOMP_PSRAM_ALLOC
+    bool "Place large cold buffers in PSRAM"
+    default y
+    help
+      Serve the 3.5 MiB audio capture ring from the 4 MiB PSRAM arena in
+      src/gba_psram.c instead of the ~320 KiB on-chip heap. Disable only
+      if the board has no external PSRAM.
+
+config GBARECOMP_SMALL_AUDIO_CAPTURE
+    bool "Shrink the audio capture ring to 1024 entries"
+    default n
+    help
+      Keep a ~32 ms observability window on targets without PSRAM.
+      Enable this when GBARECOMP_PSRAM_ALLOC is off, otherwise the
+      capture ring cannot fit in the on-chip heap.
+
+endmenu

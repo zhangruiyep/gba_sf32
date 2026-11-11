@@ -9,11 +9,11 @@
 | Phase 0 | 环境 + LCD 点亮（SDK example/lcd_fb 验证） | ✅ 完成 |
 | Phase 1 | PC 端 gbarecomp 重编译 ROM/BIOS → C++20 产物 | ✅ 完成（Mario Kart SC 4MB；8 shard；slim 后 12.68MB `.text`） |
 | Phase 2-A | 仓库根独立 scons 工程骨架 | ✅ 编译通过（`main.bin` 325,240 B） |
-| Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（已烧录，屏幕显示滚动彩条） |
-| Phase 2-C | runtime 移植到 SiFli HAL | ⏳ 方案已定，未开始 |
+| Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（当时的「滚动彩条」实为 165×15 坐标 bug，已在 2-C 修复） |
+| Phase 2-C | runtime 移植到 SiFli HAL | ✅ 完成并真机验证（BIOS 从 reset vector 跑到空闲态，236 个函数入口，无 fault；修复送屏几何后居中 240×160 白块，2026-11-11 复烧确认） |
 | Phase 3 | 音频 / 按键 / 存档 | ⏳ 未开始 |
 
-**烧录已打通**：`sftool 0.2.5`（`C:\Users\zhang\.sifli\tools\sftool\0.2.5`）+ `build_.../uart_download.bat`，串口 COM14（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000` 写入成功，屏显滚动彩条。
+**烧录已打通**：`sftool 0.2.5`（`C:\Users\zhang\.sifli\tools\sftool\0.2.5`）+ `build_.../uart_download.bat`，串口 COM14（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000` 写入成功，屏幕居中 240×160 区域出画面。
 
 > **约定：后续下载烧录由用户本人执行**，AI 只负责编译并给出烧录命令。
 
@@ -64,8 +64,10 @@
 └── 剩余                        ~15KB
 
 OPI-PSRAM 8MB (0x60000000):
-├── GBA ROM 镜像 (.gba)          1-8MB  (Phase 1 先用 <8MB 游戏)
-├── 重编译 C 代码 + 只读数据     ~1-4MB
+├── GbaBus + GbaPpu（placement new arena）  1MB
+├── 运行期冷缓冲 arena（bump 分配）         4MB  (音频采集环 3.5MB 等)
+├── LCD 全屏帧存 390×450×2                  ~343KB
+├── GBA ROM 镜像 (.gba)                     1-8MB  (Phase 2-D 起)
 └── 剩余空间
 
 NOR Flash 16MB (0x00200000):
@@ -444,8 +446,8 @@ gba_recompile.exe --rom "roms\Mario Kart Super Circuit (U).gba" --out out\cart_s
 | 步骤 | 内容 | 状态 |
 |------|------|------|
 | 2-A | 仓库根独立 scons 工程骨架，能编出可烧录固件 | ✅ 编译通过 |
-| 2-B | 显示后端：LCD 中央 240×160 写 RGB565 彩条 | ✅ 已烧录验证（屏显滚动彩条） |
-| 2-C | runtime 移植（`src/gba/*` + `runtime_arm.cpp` + `runtime_bus_bridge.cpp` 编入工程） | ⏳ 方案已定，未开始 |
+| 2-B | 显示后端：LCD 中央 240×160 写 RGB565 彩条 | ✅ 已烧录验证（当时看到的「滚动彩条」实为 165×15 的坐标 bug，见 2-C 修复） |
+| 2-C | runtime 移植（`src/gba/*` + `runtime_arm.cpp` + `runtime_bus_bridge.cpp` 编入工程） | ✅ 真机跑通，居中 240×160 已复烧确认 |
 | 2-D | 接入游戏 shard + BIOS dispatch，ROM/BIOS 放 PSRAM | ⏳ 未开始 |
 | 2-E | 按键 / 音频 / 存档 | ⏳ 未开始（Phase 3） |
 
@@ -460,8 +462,10 @@ e:\work\Github\gba_sf32\
 ├── proj.conf               # 主线程栈/优先级、ULOG 配置
 ├── rtconfig.py             # 空文件（必须存在，否则 rtconfig.LINK_SCRIPT_SRC 为 None）
 ├── src/
-│   ├── SConscript          # DefineGroup('gba_app', ['main.c'])
-│   └── main.c              # 显示后端验证（L1 放 240×160 帧存，L2 放全屏帧存）
+│   ├── SConscript          # gba_app（main.c + 宿主层 + BIOS blob）+ gba_runtime（gbarecomp）
+│   ├── main.c              # LCD 后端 + GBA arena，调 gba_device_run()
+│   ├── gba_device.cpp      # 宿主层：placement new Bus/Ppu、BIOS 装载、dispatch 主循环
+│   └── gba_device_stubs.cpp# overlay/dispatch-miss/未实现指令等 abort 桩
 ├── plan/gba_hsp_plan.md
 ├── README.md
 └── third_party/gbarecomp-main/   # 生成器源码（.gitignore 忽略，不入库）
@@ -485,7 +489,47 @@ scons --board=sf32lb52-lchspi-ulp -j8
 | RAM 占用 | 133,980 B / 512 KB（全屏帧存放在 PSRAM，不计入 L1） |
 | 烧录镜像 | 3 个：bootloader@0x12010000、main@0x12020000、ftab@0x12000000 |
 
-`main.c` 当前实现：L1 段（片上 SRAM）放 240×160 RGB565 帧存并逐帧生成滚动彩条 + 中心黑方块；L2 段（OPI-PSRAM）放 390×450 全屏帧存并用 `drv_lcd_fb_write_send()` 只刷新中央 (75,145)-(314,304) 区域；串口每秒打印 `display: N fps`。
+`main.c`（2-B 版本）：L1 段（片上 SRAM）放 240×160 RGB565 帧存并逐帧生成滚动彩条 + 中心黑方块；L2 段（OPI-PSRAM）放 390×450 全屏帧存并用 `drv_lcd_fb_write_send()` 只刷新中央 (75,145)-(314,304) 区域；串口每秒打印 `display: N fps`。
+
+**2-C 实测结果（2026-11-10）**：
+
+| 项 | 值 |
+|------|------|
+| 编译结果 | 成功（仅 2 条 `initialized and declared 'extern'` 无害告警） |
+| `main.elf` | 9,279,008 B（含符号）；二进制 914,212 B |
+| ROM 占用 | 944,040 / 8,388,608 B |
+| RAM 占用 | 199,296 / 523,264 B（`.bss` 77,988 B） |
+| PSRAM 占用 | arena 1MB + 冷缓冲 arena 4MB + LCD 帧存 343KB，均在 `0x60xxxxxx` |
+| 链接 | 无 `region 'RAM' overflowed`，全部符号解析 |
+
+**2-C 落地内容**：
+
+- `SConstruct`：全局 `CXXFLAGS += -std=c++20 -fexceptions -funwind-tables -fno-threadsafe-statics`（runtime 用 `throw` 退出 dispatch，SDK 默认 `-fno-exceptions`）。
+- `src/SConscript`：`gba_app` 组（`main.c`、`gba_device.cpp`、`gba_device_stubs.cpp`、`gba_psram.c`、生成的 `out/gen/gba_bios_blob.c`）+ `gba_runtime` 组（`src/gba/*.cpp`、`runtime_arm.cpp`、`symbol_lookup.cpp`、`runtime_bus_bridge.cpp`、`mod_function_hooks.cpp`、`out/bios/bios_recompiled.cpp`、`bios_dispatch_table.cpp`）。BIOS 二进制在 scons 阶段转成 C 数组，免去运行时文件系统。
+- `gba_psram.c`（新增）：`L2_NON_RET_BSS` 静态预留 4MB PSRAM arena，提供 bump 分配器 `gba_psram_alloc/free`（分配即清零，运行期不回收）。参考 InfoNES / PureDOOM 的 PSRAM 用法，把大块低频缓冲移出片上堆。
+- `gba_device.cpp`：PSRAM arena 上 placement new `GbaBus`/`GbaPpu`，装载 `roms/gba_bios.bin`（校验 SHA1），`set_active_bus/ppu`、`runtime_init`，复位 CPU 后 `for(;;) runtime_dispatch(g_cpu.R[15])`；BIOS 阶段用 `g_runtime_fn_entry_hook` 打「首次进入某 BIOS 函数」日志（SVC/IRQ 模式下 `runtime_should_yield` 不触发 present），PC 越过 `0x08000000` 视为 BIOS 引导结束。启动时额外打印片上堆与 PSRAM arena 的用量（`[gba] heap ...` / `[gba] psram ...`）。
+- `gba_device_stubs.cpp`：`overlay_try_dispatch` 恒 0、`runtime_dispatch_miss`/`runtime_unimplemented_op`/`runtime_force_interp_step`/`runtime_bridge_interpret` 打印后死循环、空 `kDispatchTable`、`armv4t::mul_wait_cycles`（照抄 `arm_ir.cpp`）、`gbarecomp::multiplayer_slice_safe` 恒 false。
+
+**third_party 补丁（不侵入 gbarecomp 逻辑，全部用宏门控）**：
+
+| 文件 | 宏 | 作用 |
+|------|-----|------|
+| `src/gba/gba_ppu.h` | `GBARECOMP_COMPACT_FRAMEBUFFER` | 帧存改 `std::array` 240×160×3，替代 1280×864×3 堆缓冲 |
+| `src/runtime/runtime_bus_bridge.cpp` | `GBARECOMP_NO_HOST_SAMPLER` | 去掉 `<thread>` 采样线程 |
+| `src/armv4t/runtime_arm.cpp` | `GBARECOMP_SMALL_TRACE_RING` | trace ring 4096 → 64 条（省 288 KB `.bss`） |
+| `src/runtime/runtime_bus_bridge.cpp` | `GBARECOMP_NO_HANG_TRACE_DUMP` | 去掉 hang dump 的 4096×72 B 静态 ring（再省 288 KB） |
+| `src/gba/gba_audio.h` + 新增 `gba/psram_alloc.h` | `GBARECOMP_PSRAM_ALLOC` | 采集环恢复 262144 条（3.5MB），改用 `PsramAllocator` 从 PSRAM arena 分配，不占片上堆 |
+| `src/gba/gba_color.h` | — | `std::min<uint32_t>(...)` 显式特化（ARM 上 `uint32_t` 是 `unsigned long`，模板推导失败） |
+
+上表的 6 个宏（含 `GBARECOMP_SMALL_AUDIO_CAPTURE` 降级档）已改成 **Kconfig 选项**：符号定义在 `Kconfig.proj` 的 `menu "GBARECOMP runtime"`，默认值写在 `proj.conf`，用 `scons --menuconfig` 开关。因为 gbarecomp 源码不 include `rtconfig.h`，由 `src/SConscript` 用 `GetDepend()` 读出后映射进 `gba_app` / `gba_runtime` 两个 group 的 `CPPDEFINES`，构建时打印 `[gba] runtime features: ...` 便于确认实际生效的开关。
+
+**主线程栈**：`render_scanline_impl` 的栈帧是 12,428 B（`sub.w sp, sp, #12416` + `sub sp, #12`），默认 8 KB 主线程栈不够，写 SP 越过栈下限触发 `SCB_CFSR_UFSR:0x10 STKOF` 硬故障（崩在 `[gba] bios enter` 之后的首次 scanline 渲染）。`proj.conf` 的 `CONFIG_RT_MAIN_THREAD_STACK_SIZE` 已改为 32768；`RT_USING_HEAP` 下主线程栈是 `rt_thread_create()` 从堆分配，不进 `.bss`，因此 RAM 静态占用不变（199,296 B），运行期堆多占 24 KB。
+
+**Phase 2-C 真机结果（2026-11-11，`窗口1_COM14_(2026-11-11-09-04-13)_ui.log`）**：无 fault；`heap ... used=230644`（含 32 KB 主线程栈）、`psram used=3670016 of 4194304`；BIOS 从 `00000000` 跑到 `00000348` 一带的 SWI/IRQ 空闲循环，共 236 个**首次**函数入口（`bios_entry_hook` 每 4 字节 BIOS 字只记录一次，不是 256 条上限截断）。**但屏幕只出现一条约 165×15 的白条（实拍照片核对），不是 240×160**：`g_src_area` 误用了 GBA 自身坐标系 `(0,0)-(239,159)`，而 `g_lcd_area` 用的是面板坐标 `(75,145)-(314,304)`，驱动 `area_intersect()` 求交后只剩 `(75,145)-(239,159)` = 165×15；Phase 2-B 的「滚动彩条」其实是同一个 bug（同一位置同一尺寸），不是设计效果。白色本身来自 `render_scanline_impl` 的 DISPCNT bit7 forced-blank 分支 `memset(row, 0xFF, ...)`（RGB565 0xFFFF），说明 present 回调与 PPU 扫描线渲染链路是通的，问题只在送屏几何。
+
+**修复（2026-11-11）**：`drv_lcd_fb` 的 `write_fb_async()` 里 `dst_line_addr` 不含 x 偏移，且驱动始终按 `fb.area` 的像素量刷新 `fb_clip`（LCDC 用 `data_area` 左上角作图层摆放位置），所以**不支持**在一个全屏帧存里写局部 x 区间。改为把 GBA 窗口本身注册成一个 240×160 的帧存（`area=(75,145)-(314,304)`、`line_bytes=480`、`p_data=g_gba_fb`）：每帧把 RGB565 直接转进 `g_gba_fb`，再用同一区域同时作 `write_area`/`src_area` 调 `drv_lcd_fb_write_send()`，走 `src_line_addr == dst_line_addr` 的 skip 分支，只 flush 76.8 KB 而不是 351 KB 全屏。全屏帧存 `g_lcd_fb` 只保留给开机一次性清边（之后 `drv_lcd_fb_set()` 切到窗口帧存）。另外 `gba_lcd_present()` 里不再调 `drv_lcd_fb_wait_write_done()`：它会清掉 `EVENT_WRITE_DONE`，导致下一次 `write_send()` 在 1167 行干等 100 ms 超时（这解释了日志里 2.8 s 没有一条 `[gba] frame` 打印）；`send=1` 本身已经在等上一帧 flush 完成。
+
+**复烧验证（2026-11-11）**：白区变成**居中的 240×160**，位置 `(75,145)-(314,304)`，尺寸与预期一致；说明窗口帧存 + 面板偏移的用法在 CO5300 上成立。Phase 2-C 验收通过。下一步是 Phase 2-D：把重编译后的 ROM 挂到总线（`set_rom`）并链接 shard 产物。相关的 SDK 文件（`drv_lcd_fb.c` / `drv_lcd.c` / `bf0_hal_lcdc.c` / `co5300.c`）全程只读，未做任何修改。
 
 **构建环境（不走 `set_env.bat` 交互式 ConEmu 时）**：
 
@@ -503,7 +547,7 @@ scons --board=sf32lb52-lchspi-ulp -j8
 
 1. `rtconfig.py` 必须是空文件但**必须存在**，否则 `rtconfig.LINK_SCRIPT_SRC` 为 `None`，链接阶段抛 `AttributeError`。
 2. `drv_lcd_fb_send()` 在本 SDK 只有声明没有实现，链接期 `undefined reference`；初始清屏改用 `drv_lcd_fb_write_send()`。
-3. `write_area` 与 `src_area` 处在**同一个绝对坐标空间**，只刷新中央区域时两者都要按屏幕坐标裁剪，`src` 指针仍指向整帧缓冲起点。
+3. `drv_lcd_fb_write_send()` 的 `write_area` 与 `src_area` 必须处在**同一坐标系**（都按 `fb.area` 的绝对坐标），驱动只对二者求交；且它按 `fb.area` 的像素量整块刷新 `fb_clip`，`dst_line_addr` 不含 x 偏移，因此**不支持**把局部 x 区间写进一张全屏帧存 —— 要显示小于面板的窗口，就把窗口本身注册成帧存。
 4. 工程路径盘符必须大写 `E:`（小写会让 board 源文件被重复加入，报 `multiple definition of bsp_init`）。
 
 **烧录结果（2026-11-10，已解决）**
@@ -514,7 +558,7 @@ scons --board=sf32lb52-lchspi-ulp -j8
   sftool -p COM14 -c SF32LB52 -m nor write_flash "bootloader\bootloader.bin@0x12010000" "main.bin@0x12020000" "ftab\ftab.bin@0x12000000"
   ```
 - `sftool` 位置：`C:\Users\zhang\.sifli\tools\sftool\0.2.5\sftool.exe`（需在 PATH 中），参数取自同目录 `sftool_param.json`（`chip=SF32LB52`、`memory=NOR`）。
-- 验证：烧录后屏幕显示中央 240×160 滚动彩条，Phase 2-B 通过。
+- 验证：烧录后屏幕在中央 240×160 区域出画面（2-B 时看到的是 165×15 细条，坐标 bug；2-C 修复后为居中 240×160）。
 
 **2-C runtime 移植方案（已调研确认）**：
 
@@ -621,9 +665,9 @@ void gba_frame_wait(uint32_t start_cycles) {
 | # | 验证点 | 通过标准 | 状态 |
 |---|--------|---------|------|
 | 2.1 | LCD 屏幕点亮 | 全黑背景 390×450 | ✅ 通过 |
-| 2.2 | 居中区域可写 | 中央 240×160 显示测试色块 | ✅ 通过（滚动彩条） |
-| 2.3 | CPU 跑通 BIOS | 串口打印 BIOS 初始化日志 | ⏳ 未开始 |
-| 2.4 | PPU 软渲染输出 | GBA 画面正确显示在居中区域 | ⏳ 未开始 |
+| 2.2 | 居中区域可写 | 中央 240×160 显示测试色块 | ✅ 通过（2026-11-11 复烧确认居中 240×160 白块） |
+| 2.3 | CPU 跑通 BIOS | 串口打印 BIOS 初始化日志 | ✅ 通过（236 个函数入口后进入空闲循环） |
+| 2.4 | PPU 软渲染输出 | GBA 画面正确显示在居中区域 | ✅ 通过（无卡时 forced blank 的 240×160 白块正好居中；待挂 ROM 后看真实画面） |
 | 2.5 | 颜色格式正确 | BGR555 → RGB565 颜色无偏差 | ⏳ 未开始 |
 | 2.6 | 跑通游戏标题画面 | Mario Kart Super Circuit 标题显示 | ⏳ 未开始 |
 
