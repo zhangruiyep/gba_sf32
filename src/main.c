@@ -1,9 +1,10 @@
 /*
  * GBA on SF32LB52 — device entry point.
  *
- * Phase 2-C: the recompiled GBA runtime runs the guest BIOS from its reset
- * vector, and each VBlank the latched 240x160 RGB888 frame is converted and
- * pushed to the panel through the SDK framebuffer driver (drv_lcd_fb).
+ * Phase 2-D: the recompiled GBA runtime runs the guest BIOS from its reset
+ * vector, boots the cartridge image loaded from the TF card, and each VBlank
+ * the latched 240x160 RGB888 frame is converted and pushed to the panel
+ * through the SDK framebuffer driver (drv_lcd_fb).
  *
  * Memory placement:
  *   - the 240x160 RGB565 GBA window lives in on-chip SRAM (L1)
@@ -174,7 +175,7 @@ extern void gba_device_run(void *arena, unsigned int arena_bytes);
 
 int main(void)
 {
-    rt_kprintf("[gba] SF32LB52 GBA runtime, Phase 2-C\n");
+    rt_kprintf("[gba] SF32LB52 GBA runtime, Phase 2-D\n");
 
 #ifdef BSP_USING_LCD_FRAMEBUFFER
     gba_lcd_init();

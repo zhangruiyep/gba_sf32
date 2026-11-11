@@ -1,6 +1,6 @@
 # GBA ROM 重编译到思澈黄山派 实施计划
 
-> 最后更新：2026-11-10
+> 最后更新：2026-11-11
 
 ## 0. 当前状态总览
 
@@ -11,11 +11,18 @@
 | Phase 2-A | 仓库根独立 scons 工程骨架 | ✅ 编译通过（`main.bin` 325,240 B） |
 | Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（当时的「滚动彩条」实为 165×15 坐标 bug，已在 2-C 修复） |
 | Phase 2-C | runtime 移植到 SiFli HAL | ✅ 完成并真机验证（BIOS 从 reset vector 跑到空闲态，236 个函数入口，无 fault；修复送屏几何后居中 240×160 白块，2026-11-11 复烧确认） |
+| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | 🚧 编译链接通过（`main.bin` 16,342,472 B / 15.585 MiB，余 264 KB）；首烧真机已验证 TF 挂载成功、无卡回退正常，待放入 `gba.gba` 验证卡带执行 |
+| Phase 2-E | 容量瘦身（若 2-D 链接超 15.84MiB） | ⏳ 按量测结果决定 |
 | Phase 3 | 音频 / 按键 / 存档 | ⏳ 未开始 |
 
 **烧录已打通**：`sftool 0.2.5`（`C:\Users\zhang\.sifli\tools\sftool\0.2.5`）+ `build_.../uart_download.bat`，串口 COM14（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000` 写入成功，屏幕居中 240×160 区域出画面。
 
 > **约定：后续下载烧录由用户本人执行**，AI 只负责编译并给出烧录命令。
+
+**Phase 2-D 首烧结果（2026-11-11，COM14）**：SD 卡识别为 29.29 GB SDHC（SPI1 / `spi_msd` 注册 `sd0`），
+`dfs_mount("sd0","/","elm",0,0)` 返回成功；因 TF 卡上尚未放 ROM，打印 `/gba.gba not found` 后
+按设计回退「仅 BIOS」路径，BIOS 从 reset vector 跑到 `00000348` 空闲态，236 个首次入口，无 fault。
+剩余待验证项只有「放上 4 MiB `gba.gba` 后的卡带执行」：ROM 标题/游戏码、4 MiB 读取耗时、出帧与帧率。
 
 ---
 
@@ -58,22 +65,41 @@
 
 ```
 片上 SRAM 512KB (0x20000000):
-├── rt-thread + SDK 栈堆       ~100KB
-├── GBA 帧缓冲 240×160×2       = 76.8KB
-├── GBA 全局状态/WRAM+EWRAM    ~320KB  (CPU状态 + 32KB WRAM + 256KB EWRAM + 其他)
-└── 剩余                        ~15KB
+├── rt-thread + SDK 栈堆        ~100KB
+├── 2-C 固件实测占用            133,980 B
+└── 结论：装不下 GbaBus(~386KB)+两帧(~230KB)=616KB → 已改 PSRAM placement new
 
 OPI-PSRAM 8MB (0x60000000):
-├── GbaBus + GbaPpu（placement new arena）  1MB
-├── 运行期冷缓冲 arena（bump 分配）         4MB  (音频采集环 3.5MB 等)
+├── g_gba_arena（GbaBus + GbaPpu）          1MB 静态预留（实际需 ~620KB）
+├── gba_psram 冷缓冲 arena（bump 分配）     1MB 预留（音频采集环已缩到 ~14KB）
 ├── LCD 全屏帧存 390×450×2                  ~343KB
-├── GBA ROM 镜像 (.gba)                     1-8MB  (Phase 2-D 起)
-└── 剩余空间
+├── GBA ROM 运行期镜像                      4MB（开机从 TF 卡整份读入）
+└── 合计 ~6.4MB / 8MB，余 ~1.6MB
 
-NOR Flash 16MB (0x00200000):
-├── bootloader + SDK 固件        ~200KB
-└── 应用固件                     剩余
+NOR Flash 16MB (0x12000000 = flash2 base):
+├── ftab 0x00000000 (32KB) + bootloader 0x00010000 (64KB)
+├── main 分区：板级 ptab.json 的 max_size 只有 8MiB（硬上限）
+│   └── 工程级 ptab.json 已扩到 0xFD8000 ≈ 15.84MiB
+│       （删掉 dfu / dfu_download / fs_root，kvdb 移到 0xFF8000）
+└── kvdb 0x00FF8000 (16KB) + 0x00FFC000 (16KB)
+
+TF 卡（SPI1，板级 bsp_pinmux 已配好）:
+├── CLK PA28 / MOSI PA24 / MISO PA25 / CS PA29 / CD PA27
+├── SDK spi_msd 注册 sd0（INIT_PREV_EXPORT 自动初始化），SPI 上限 12MHz
+└── ROM 文件固定在卡根目录 `/gba.gba`
+
+容量结论（2026-11-11 实测，ROM 移到 TF 卡）:
+  ROM 本体不占 NOR，只需装重编译代码。真实链接结果：
+  8 shard .text 12,863,180 + dispatch 2,567,136 + BIOS/runtime/SDK ~880,000
+  = main.bin 16,342,472 B (15.585 MiB)  vs  分区 16,613,376 B (15.84 MiB)
+  余量 270,904 B（264 KB）——已通过，无需瘦身。
+  代价：symbol_map.cpp（519,526 B）不链接，串口 trace 只显示地址不显示函数名；
+  若 2-E 需要恢复函数名，用压缩符号表（区间编码）把 519 KB 压到 ~120 KB。
+  构建命令见 .trae/documents/gba_phase2d_small_rom_bringup.md §8。
 ```
+
+> 注：PSRAM 只能承载运行期数据（BSS + 自己清零/拷贝），**不能**放链接期带初值的 const 表——`link_copy.lds` 的 `.RW_PSRAM_NON_RET` 无 `AT>`，启动拷贝表不含 PSRAM。
+> ROM 原始字节必须常驻 RAM（重编译只翻译指令，图形/音频/关卡数据运行时仍经 0x08000000 读取），因此开机整份读入 PSRAM，而不是按需读卡（SPI 12MHz ≈1.2MB/s，每帧仅 ~20KB 预算，同步 bus 读会阻塞 DMA/IRQ）。
 
 ---
 
@@ -448,8 +474,9 @@ gba_recompile.exe --rom "roms\Mario Kart Super Circuit (U).gba" --out out\cart_s
 | 2-A | 仓库根独立 scons 工程骨架，能编出可烧录固件 | ✅ 编译通过 |
 | 2-B | 显示后端：LCD 中央 240×160 写 RGB565 彩条 | ✅ 已烧录验证（当时看到的「滚动彩条」实为 165×15 的坐标 bug，见 2-C 修复） |
 | 2-C | runtime 移植（`src/gba/*` + `runtime_arm.cpp` + `runtime_bus_bridge.cpp` 编入工程） | ✅ 真机跑通，居中 240×160 已复烧确认 |
-| 2-D | 接入游戏 shard + BIOS dispatch，ROM/BIOS 放 PSRAM | ⏳ 未开始 |
-| 2-E | 按键 / 音频 / 存档 | ⏳ 未开始（Phase 3） |
+| 2-D | 接上卡带：小测试 ROM 验证 cart → dispatch → PPU → 送屏链路 | ⏳ 方案已定，未编码 |
+| 2-E | 真实 ROM 接入：容量优化（dispatch 压缩 / -Oz / ROM LZ4）+ 端到端验证 | ⏳ 未开始 |
+| 2-F | 按键 / 音频 / 存档 | ⏳ 未开始（Phase 3） |
 
 **工程结构（已落地，独立于 SDK 目录）**：
 

@@ -72,7 +72,8 @@ runtime_cppdefines = [name for name in runtime_features if feature_enabled(name)
 print('[gba] runtime features: %s' % (' '.join(runtime_cppdefines) or '(none)'))
 
 # ── Host/device application layer ────────────────────────────────────────
-app_src = ['main.c', 'gba_device.cpp', 'gba_device_stubs.cpp', 'gba_psram.c']
+app_src = ['main.c', 'gba_device.cpp', 'gba_device_stubs.cpp', 'gba_psram.c',
+           'gba_cart_sd.c']
 if os.path.isfile(gen_c):
     app_src.append(gen_c)
 
@@ -92,6 +93,20 @@ runtime_src += [
     os.path.join(root, 'out', 'bios', 'bios_dispatch_table.cpp'),
 ]
 
+# ── Recompiled cartridge (out/cart_slim, produced by gba_recompile.exe) ──
+# The image itself lives on the TF card; only the translated code is linked
+# into the firmware.
+cart_dir = os.path.join(root, 'out', 'cart_slim')
+cart_src = sorted(glob.glob(os.path.join(cart_dir, 'recompiled_*.cpp')))
+if cart_src:
+    # symbol_map.cpp (519 KB of address -> name records) is deliberately left
+    # out: the 0xFD8000 main partition overflows by ~249 KB with it, and the
+    # table only feeds human-readable names in traces. Restoring it needs the
+    # compressed symbol table planned for Phase 2-E.
+    runtime_src += cart_src + [os.path.join(cart_dir, 'dispatch_table.cpp')]
+else:
+    print('warning: no recompiled cartridge in %s' % cart_dir)
+
 runtime_cpppath = [
     gbarecomp_src,
     os.path.join(gbarecomp_src, 'gba'),
@@ -100,6 +115,7 @@ runtime_cpppath = [
     os.path.join(gbarecomp_src, 'debug'),
     os.path.join(gbarecomp, 'external', 'arm-recomp-core', 'profiles', 'armv4t_gba'),
     os.path.join(root, 'out', 'bios'),
+    cart_dir,
 ]
 
 group += DefineGroup('gba_runtime', runtime_src, depend=[''], CPPPATH=runtime_cpppath,

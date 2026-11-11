@@ -17,7 +17,10 @@
 
 #include "mem_section.h"
 
-#define GBA_PSRAM_ARENA_BYTES   (4 * 1024 * 1024)
+/* The only cold buffer is the audio capture ring, which
+ * GBARECOMP_SMALL_AUDIO_CAPTURE shrinks to ~14 KB. The rest of PSRAM goes to
+ * the machine arena, the LCD framebuffer and the 4 MiB cartridge image. */
+#define GBA_PSRAM_ARENA_BYTES   (1 * 1024 * 1024)
 #define GBA_PSRAM_ALIGN         64
 
 L2_NON_RET_BSS_SECT_BEGIN(gba_psram)

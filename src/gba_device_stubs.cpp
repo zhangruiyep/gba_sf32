@@ -70,22 +70,6 @@ extern "C" int runtime_bridge_interpret(std::uint32_t entry_pc, bool entry_thumb
 // interpreter" diagnostic switch.
 extern "C" int g_force_interp = 0;
 
-// Per-game dispatch table. Phase 2-C runs the BIOS only, so the cartridge
-// table is empty; the BIOS table lives in out/bios/bios_dispatch_table.cpp.
-struct DispatchEntry
-{
-    std::uint32_t addr;
-    std::uint8_t thumb;
-    std::uint8_t resume;
-    void (*fn)(void);
-};
-
-extern "C" const DispatchEntry kDispatchTable[] =
-{
-    {0u, 0u, 0u, nullptr},
-};
-extern "C" const unsigned kDispatchTableLen = 0;
-
 namespace armv4t
 {
 

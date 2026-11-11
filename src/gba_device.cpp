@@ -1,8 +1,9 @@
 // gba_device.cpp — device-side host layer around the recompiled GBA runtime.
 //
-// Phase 2-C: boot the guest BIOS from its reset vector with no cartridge
-// mapped, trace the BIOS functions it executes over the serial port, and stop
-// once the guest hands control to the (absent) cartridge.
+// Phase 2-D: boot the guest BIOS from its reset vector, hand over to the
+// cartridge image read from the TF card, and keep dispatching recompiled cart
+// code. With no card present the firmware falls back to the Phase 2-C
+// behaviour (BIOS only, stop at the first cart fetch).
 //
 // The GBA machine objects are constructed with placement new inside a PSRAM
 // arena supplied by main.c: GbaBus owns ~386 KB of inline guest RAM and
@@ -11,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <new>
 
@@ -36,6 +38,16 @@ extern "C" std::size_t gba_psram_capacity(void);
 extern "C" const uint8_t  g_gba_bios_blob[];
 extern "C" const uint32_t g_gba_bios_blob_size;
 
+// src/gba_cart_sd.c: cartridge image read from the TF card into PSRAM.
+extern "C" const uint8_t *gba_cart_image(void);
+extern "C" std::size_t    gba_cart_load(const char *path);
+
+// The SDK start-up code never calls __libc_init_array(), so C++ file-scope
+// constructors are dead by default. The recompiled cartridge uses one to
+// register its native-RAM code templates with the dispatcher.
+extern "C" void (*__init_array_start[])(void);
+extern "C" void (*__init_array_end[])(void);
+
 // main.c: convert an RGB888 GBA frame and push it to the panel.
 extern "C" void gba_lcd_present(const uint8_t *rgb888, uint32_t width, uint32_t height);
 
@@ -47,6 +59,7 @@ namespace {
 
 constexpr uint32_t kCartBase = 0x08000000u;
 constexpr uint32_t kBiosSize = 16u * 1024u;
+constexpr const char *kCartPath = "/gba.gba";
 
 gba::GbaBus  *g_bus = nullptr;
 gba::GbaPpu  *g_ppu = nullptr;
@@ -70,6 +83,39 @@ void print_heap(const char *stage)
     rt_kprintf("[gba] psram %s: used=%u of %u\n", stage,
                (unsigned int)gba_psram_used(),
                (unsigned int)gba_psram_capacity());
+}
+
+void run_static_initializers(void)
+{
+    uint32_t count = 0;
+
+    for (void (**fn)(void) = __init_array_start; fn < __init_array_end; ++fn)
+    {
+        if (*fn != nullptr)
+        {
+            (*fn)();
+            ++count;
+        }
+    }
+    rt_kprintf("[gba] static initializers: %u\n", (unsigned int)count);
+}
+
+// Log the cartridge header so a wrong file on the card is obvious.
+void log_cart_header(const uint8_t *rom, std::size_t size)
+{
+    char title[13];
+    char code[5];
+
+    if (size < 0xC0)
+    {
+        return;
+    }
+
+    std::memcpy(title, rom + 0xA0, 12);
+    std::memcpy(code, rom + 0xAC, 4);
+    title[12] = '\0';
+    code[4] = '\0';
+    rt_kprintf("[gba] cart: \"%s\" %s, %u B\n", title, code, (unsigned int)size);
 }
 
 void bios_entry_hook(uint32_t pc)
@@ -157,6 +203,7 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     g_bus = new (reinterpret_cast<void *>(base)) gba::GbaBus();
     g_ppu = new (reinterpret_cast<void *>(base + sizeof(gba::GbaBus))) gba::GbaPpu();
     print_heap("after machine init");
+    run_static_initializers();
 
     std::string err;
     if (!g_bios.load_from_bytes(g_gba_bios_blob, g_gba_bios_blob_size,
@@ -167,8 +214,20 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     }
     print_heap("after BIOS load");
 
+    const std::size_t cart_size = gba_cart_load(kCartPath);
+    const uint8_t *cart = (cart_size != 0) ? gba_cart_image() : nullptr;
+    if (cart != nullptr)
+    {
+        log_cart_header(cart, cart_size);
+    }
+    else
+    {
+        rt_kprintf("[gba] no cartridge, running the BIOS alone\n");
+    }
+    print_heap("after cart load");
+
     g_bus->set_bios(&g_bios);
-    g_bus->set_rom(nullptr, 0);   // Phase 2-C runs the BIOS with no cartridge
+    g_bus->set_rom(cart, cart_size);
     g_bus->io().set_ppu(g_ppu);
     g_bus->io().set_bus(g_bus);
 
@@ -186,7 +245,7 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     for (;;)
     {
         const uint32_t pc = g_cpu.R[15];
-        if (pc >= kCartBase)
+        if ((cart == nullptr) && (pc >= kCartBase))
         {
             break;
         }

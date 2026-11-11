@@ -71,3 +71,6 @@ rtconfig.pyc
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 串口调试日志（serials 导出，内容随时变化）
+*_ui.log
