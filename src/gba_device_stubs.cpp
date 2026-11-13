@@ -53,7 +53,6 @@ constexpr std::uint32_t kMissPcSlots = 64;
 std::uint32_t g_miss_pcs[kMissPcSlots];
 std::uint32_t g_miss_pc_count = 0;
 std::uint32_t g_miss_total = 0;
-std::uint64_t g_bridged_insns = 0;
 
 void note_miss(std::uint32_t pc, bool thumb)
 {
@@ -290,7 +289,6 @@ extern "C" int runtime_bridge_interpret(std::uint32_t entry_pc, bool entry_thumb
         // The bridged subroutine returned: pop the caller frame it consumed.
         runtime_call_stack_restore(runtime_call_stack_data(), entry_depth - 1u);
     }
-    g_bridged_insns += bridged;
     return 1;
 }
 

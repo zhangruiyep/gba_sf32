@@ -24,14 +24,6 @@
 #include "gba_bus.h"
 #include "gba_ppu.h"
 
-// RT-Thread's operator new returns nullptr instead of throwing, so an oversized
-// std::vector inside the runtime shows up as a null-pointer fault with no hint.
-// Print the heap high-water mark around each bring-up step.
-
-// src/gba_psram.c: external PSRAM arena that backs the runtime's cold buffers.
-extern "C" std::size_t gba_psram_used(void);
-extern "C" std::size_t gba_psram_capacity(void);
-
 // Baked into the image by src/SConscript from roms/gba_bios.bin.
 extern "C" const uint8_t  g_gba_bios_blob[];
 extern "C" const uint32_t g_gba_bios_blob_size;
@@ -53,11 +45,6 @@ extern "C" void gba_lcd_present(const uint8_t *rgb888, uint32_t width, uint32_t 
 void runtime_set_frame_present_hook(std::function<bool()> hook);
 void runtime_mark_present_stack_base();
 
-// Depth of IRQ handlers currently on the host stack (runtime_arm.cpp). The
-// frame-present gate inside runtime_should_yield() requires it to be zero, so
-// a stuck non-zero value silently disables presentation.
-extern "C" uint32_t g_irq_nest_depth;
-
 namespace {
 
 constexpr uint32_t kCartBase = 0x08000000u;
@@ -68,97 +55,23 @@ gba::GbaBus  *g_bus = nullptr;
 gba::GbaPpu  *g_ppu = nullptr;
 gba::GbaBios  g_bios;
 
-// One bit per 4-byte BIOS word: each BIOS function entry is logged once, and
-// the trace doubles as a coverage summary when boot ends.
+// One bit per 4-byte BIOS word, so the entry count below reports distinct
+// functions instead of every call.
 uint8_t  g_bios_seen[kBiosSize / 4u / 8u];
 uint32_t g_bios_entries = 0;
 uint32_t g_frames = 0;
-
-// ── Phase 2-D bring-up probes (temporary) ───────────────────────────────
-// The frame-present hook is only reachable from runtime_should_yield(), which
-// slim codegen strips from the cartridge entirely, so guest code can never
-// present a cart frame. These counters show whether the guest is advancing:
-//   cart_ent -> does the guest ever execute cartridge code (entry hook)
-//   disp     -> does control return to the host dispatch loop
-//   idle     -> host-side HALT pumps (guest has no code to run until an IRQ)
-//   hal/irqd -> is the CPU parked in HALT, or is an IRQ chain stuck on our stack
-uint32_t g_cart_entries = 0;
-uint32_t g_dispatch_returns = 0;
-uint32_t g_idle_pumps = 0;
-rt_uint32_t g_last_status_tick = 0;
-unsigned int g_last_status_vblank = 0;
+bool     g_cart_entered = false;
 unsigned int g_presented_vblank = 0;
-
-void debug_status(void *parameter)
-{
-    (void)parameter;
-
-    const rt_uint32_t now = rt_tick_get();
-    const unsigned int vbl = (unsigned int)g_runtime_vblank_starts;
-    const uint32_t psr = g_cpu.cpsr;
-
-    gbarecomp::RuntimeTimingContext timing;
-    gbarecomp::runtime_capture_timing_context(timing);
-
-    // rt_kprintf has no %ll, so every 64-bit counter is narrowed to 32 bits;
-    // all of these stay far below 2^32 during a bring-up window.
-    rt_kprintf("[gba] dbg t=%u pc=%08x psr=%08x mode=%02x T=%u vbl=%u(+%u) cyc=%u irqd=%u hal=%u cart_ent=%u disp=%u idle=%u frame=%u\n",
-               (unsigned int)now, g_cpu.R[15], psr,
-               (unsigned int)(psr & 0x1Fu), (unsigned int)((psr >> 5) & 1u),
-               vbl, vbl - g_last_status_vblank,
-               (unsigned int)timing.cycles, (unsigned int)g_irq_nest_depth,
-               (unsigned int)(g_bus->io().halted() ? 1u : 0u),
-               (unsigned int)g_cart_entries, (unsigned int)g_dispatch_returns,
-               (unsigned int)g_idle_pumps, (unsigned int)g_frames);
-
-    g_last_status_tick = now;
-    g_last_status_vblank = vbl;
-}
-
-// Runs on the soft-timer thread, so it keeps reporting even when the guest
-// never yields back to the host loop.
-void debug_status_start(void)
-{
-    rt_timer_t timer = rt_timer_create("gba_dbg", &debug_status, RT_NULL, 1000u,
-                                       RT_TIMER_FLAG_PERIODIC | RT_TIMER_FLAG_SOFT_TIMER);
-    if (timer == RT_NULL)
-    {
-        rt_kprintf("[gba] dbg timer create failed\n");
-        return;
-    }
-
-    g_last_status_tick = rt_tick_get();
-    g_last_status_vblank = g_runtime_vblank_starts;
-    rt_timer_start(timer);
-}
-
-void print_heap(const char *stage)
-{
-    rt_uint32_t total = 0;
-    rt_uint32_t used = 0;
-    rt_uint32_t max_used = 0;
-
-    rt_memory_info(&total, &used, &max_used);
-    rt_kprintf("[gba] heap %s: total=%u used=%u max=%u\n",
-               stage, total, used, max_used);
-    rt_kprintf("[gba] psram %s: used=%u of %u\n", stage,
-               (unsigned int)gba_psram_used(),
-               (unsigned int)gba_psram_capacity());
-}
 
 void run_static_initializers(void)
 {
-    uint32_t count = 0;
-
     for (void (**fn)(void) = __init_array_start; fn < __init_array_end; ++fn)
     {
         if (*fn != nullptr)
         {
             (*fn)();
-            ++count;
         }
     }
-    rt_kprintf("[gba] static initializers: %u\n", (unsigned int)count);
 }
 
 // Log the cartridge header so a wrong file on the card is obvious.
@@ -185,15 +98,12 @@ void bios_entry_hook(uint32_t pc)
     {
         // The hook also fires from every generated cartridge function, so this
         // proves whether the guest ever got past the BIOS hand-off.
-        if (pc >= kCartBase)
+        if (pc >= kCartBase && !g_cart_entered)
         {
-            if (g_cart_entries == 0u)
-            {
-                rt_kprintf("[gba] cart entered: pc=%08x psr=%08x mode=%02x T=%u\n",
-                           pc, g_cpu.cpsr, (unsigned int)(g_cpu.cpsr & 0x1Fu),
-                           (unsigned int)((g_cpu.cpsr >> 5) & 1u));
-            }
-            ++g_cart_entries;
+            g_cart_entered = true;
+            rt_kprintf("[gba] cart entered: pc=%08x psr=%08x mode=%02x T=%u\n",
+                       pc, g_cpu.cpsr, (unsigned int)(g_cpu.cpsr & 0x1Fu),
+                       (unsigned int)((g_cpu.cpsr >> 5) & 1u));
         }
         return;
     }
@@ -205,11 +115,10 @@ void bios_entry_hook(uint32_t pc)
         return;
     }
 
+    // Only the distinct-entry count is kept; per-function traces are far too
+    // noisy to leave enabled once the boot path is stable.
     g_bios_seen[bit >> 3] |= mask;
-    if (++g_bios_entries <= 256u)
-    {
-        rt_kprintf("[gba] bios enter %08x\n", pc);
-    }
+    ++g_bios_entries;
 }
 
 // Mirrors reset_recomp_cpu() in the host-only runtime.cpp.
@@ -272,9 +181,6 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     const uintptr_t base = (reinterpret_cast<uintptr_t>(arena) + 15u) & ~uintptr_t(15u);
     const std::size_t need = sizeof(gba::GbaBus) + sizeof(gba::GbaPpu);
 
-    rt_kprintf("[gba] GbaBus %u B, GbaPpu %u B, arena %u B\n",
-               (unsigned int)sizeof(gba::GbaBus), (unsigned int)sizeof(gba::GbaPpu),
-               arena_bytes);
     if (arena_bytes < need + 15u)
     {
         rt_kprintf("[gba] arena too small, need %u B\n", (unsigned int)(need + 15u));
@@ -283,7 +189,6 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
 
     g_bus = new (reinterpret_cast<void *>(base)) gba::GbaBus();
     g_ppu = new (reinterpret_cast<void *>(base + sizeof(gba::GbaBus))) gba::GbaPpu();
-    print_heap("after machine init");
     run_static_initializers();
 
     std::string err;
@@ -293,7 +198,6 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
         rt_kprintf("[gba] BIOS rejected: %s\n", err.c_str());
         return;
     }
-    print_heap("after BIOS load");
 
     const std::size_t cart_size = gba_cart_load(kCartPath);
     const uint8_t *cart = (cart_size != 0) ? gba_cart_image() : nullptr;
@@ -305,8 +209,9 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     {
         rt_kprintf("[gba] no cartridge, running the BIOS alone\n");
     }
-    print_heap("after cart load");
 
+    // set_rom() scans the whole image for MBC/EEPROM/gyro tables, which is the
+    // dominant part of boot latency on a 4 MiB cartridge.
     const rt_uint32_t bus_tick = rt_tick_get();
     g_bus->set_bios(&g_bios);
     g_bus->set_rom(cart, cart_size);
@@ -325,7 +230,6 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     reset_cpu();
 
     rt_kprintf("[gba] BIOS loaded, booting from reset vector %08x\n", g_cpu.R[15]);
-    debug_status_start();
 
     for (;;)
     {
@@ -352,7 +256,6 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
                 chunk = 1u;
             }
             runtime_tick(chunk);
-            ++g_idle_pumps;
         }
         else
         {
@@ -362,7 +265,6 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
                 break;
             }
             runtime_dispatch(pc);
-            ++g_dispatch_returns;
         }
 
         // Slim codegen strips runtime_should_yield() from the cartridge, so the
