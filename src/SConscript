@@ -8,6 +8,7 @@ cwd = GetCurrentDir()
 root = os.path.normpath(os.path.join(cwd, '..'))
 gbarecomp = os.path.join(root, 'third_party', 'gbarecomp-main')
 gbarecomp_src = os.path.join(gbarecomp, 'src')
+armcore = os.path.join(gbarecomp, 'external', 'arm-recomp-core', 'profiles', 'armv4t_gba')
 
 # ── Guest BIOS image as a C array ────────────────────────────────────────
 # The BIOS is part of the address space the runtime executes from, so it is
@@ -89,6 +90,14 @@ runtime_src += [
     os.path.join(gbarecomp_src, 'armv4t', 'symbol_lookup.cpp'),
     os.path.join(gbarecomp_src, 'runtime', 'runtime_bus_bridge.cpp'),
     os.path.join(gbarecomp_src, 'runtime', 'mod_function_hooks.cpp'),
+    os.path.join(gbarecomp_src, 'runtime', 'arm_cpu_bridge.cpp'),
+    # Reference interpreter: the Tier3 fallback for dispatch misses that the
+    # static finder could not reach (function-pointer tables, computed jumps
+    # into a function body, RAM code). ~10 KiB of .text for all four.
+    os.path.join(armcore, 'interpreter.cpp'),
+    os.path.join(armcore, 'thumb_decode.cpp'),
+    os.path.join(armcore, 'arm_decode.cpp'),
+    os.path.join(armcore, 'arm_ir.cpp'),
     os.path.join(root, 'out', 'bios', 'bios_recompiled.cpp'),
     os.path.join(root, 'out', 'bios', 'bios_dispatch_table.cpp'),
 ]

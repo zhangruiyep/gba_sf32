@@ -1,6 +1,6 @@
 # GBA ROM 重编译到思澈黄山派 实施计划
 
-> 最后更新：2026-11-11
+> 最后更新：2026-11-13
 
 ## 0. 当前状态总览
 
@@ -11,8 +11,8 @@
 | Phase 2-A | 仓库根独立 scons 工程骨架 | ✅ 编译通过（`main.bin` 325,240 B） |
 | Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（当时的「滚动彩条」实为 165×15 坐标 bug，已在 2-C 修复） |
 | Phase 2-C | runtime 移植到 SiFli HAL | ✅ 完成并真机验证（BIOS 从 reset vector 跑到空闲态，236 个函数入口，无 fault；修复送屏几何后居中 240×160 白块，2026-11-11 复烧确认） |
-| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | 🚧 编译链接通过（`main.bin` 16,342,472 B / 15.585 MiB，余 264 KB）；首烧真机已验证 TF 挂载成功、无卡回退正常，待放入 `gba.gba` 验证卡带执行 |
-| Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 模板表去重） | 📋 候选已归档（见 §3.2.4）。2-D 未超限，非阻塞；待 TF 卡真实 ROM 验证通过后再决定是否实施 |
+| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.5 |
+| Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 模板表去重） | 📋 候选已归档（见 §3.2.4）。2-D 未超限（ROM 余 370,564 B），非阻塞；Tier3 已使补种子路线不再必要，是否实施待定 |
 | Phase 3 | 音频 / 按键 / 存档 | ⏳ 未开始 |
 
 **烧录已打通**：`sftool 0.2.5`（`C:\Users\zhang\.sifli\tools\sftool\0.2.5`）+ `build_.../uart_download.bat`，串口 COM14（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000` 写入成功，屏幕居中 240×160 区域出画面。
@@ -24,10 +24,208 @@
 按设计回退「仅 BIOS」路径，BIOS 从 reset vector 跑到 `00000348` 空闲态，236 个首次入口，无 fault。
 剩余待验证项只有「放上 4 MiB `gba.gba` 后的卡带执行」：ROM 标题/游戏码、4 MiB 读取耗时、出帧与帧率。
 
-> **当前唯一的下一步（阻塞在用户侧）**：往 TF 卡根目录放 `gba.gba`（4,194,304 B，FAT32）后重新上电，
-> 复刻首烧串口日志。在这一步拿到真实游戏出画面的结果之前，不启动 Phase 2-E 的任何代码改动。
+> **Phase 2-D 已完成**（2026-11-13 12:12 烧录，屏幕出游戏画面），达成条件与证据见 §0.5。
+> 后续不再为「让派发表覆盖所有函数」而补种子，miss 一律由 Tier3 解释器兜底。
 
----
+### 0.1 Phase 2-D 第二次烧录（2026-11-13 08:59，COM14）— BIOS HALT 死锁
+
+**现象**：TF 卡识别 `MARIO KART` / `AMKE` / 4,194,304 B 正常；`bus bind (bios+rom)` 924 ms；
+BIOS 236 个首次入口后，执行链 `0x2d58 → 0x1c40 → 0x3728 → 0x372c → 0x328 → 0x330 → 0x358 → 0x344 → 0x348`
+（`0x344` 是 `strb r3,[r12,#0x301]` 写 HALTCNT，`0x348` 是 `bios_halt_cont_0348` 续跑点），此后 PC 永久冻结在 `0x348`：
+`cart_ent=0`（卡带从未执行）、无 `[gba] frame`、`vbl` 每秒仅 `+7`（正常应 ≈60）。
+
+**根因**：设备侧 run loop 未移植 host runner 的 `pump_idle()`。GBA 的空闲是「CPU 停、外设跑」，
+而本 runtime 的时间模型是「指令驱动时间」——停就没有驱动源。
+
+1. `halted=1` 后 `runtime_should_yield()` 直接 `return halted`（即 true），一条指令都不执行；
+2. 不执行 → 无 `runtime_tick()` → `cycles` 不前进 → PPU 到不了 scanline 160 → 无 VBlank IRQ；
+3. `clear_halt()` 只在 `runtime_tick()` 的 IRQ 分支调用 → 永不清除 halted → 回到第 1 步，永久闭环。
+
+关键认识：`runtime_should_yield()` 在 halted 时返回 true 是**正确行为**（语义是「把控制权交还宿主」），
+缺陷在接手的人没干活。因此修在宿主 run loop，而非改 `yield`。
+
+**修复**（`src/gba_device.cpp`，已编译通过）：
+
+| 改动 | 内容 |
+|------|------|
+| HALT 泵 | halted 时按 `min(ppu.cycles_until_next_event(), io.cycles_until_next_timer_event(), audio.cycles_until_next_shared_event())` 取 chunk 调 `runtime_tick(chunk)`，clamp 到 ≥1；等价于 host `step_once` 的 `pump_idle` |
+| 宿主侧出帧 | slim codegen 删光了卡带里的 `yield`，present hook 不可达；改为每轮循环后调 `present_frame()`，按 `g_runtime_vblank_starts` 去重，一个 VBlank 只刷一次屏 |
+| 探针修正 | `rt_kprintf` 不支持 `%llu`，64 位量全部收窄为 `unsigned int` 用 `%u`；新增 `cyc/irqd/hal/idle` 字段 |
+
+**附：924 ms 空白非故障**，是 `GbaBus::set_rom()` 对 4 MiB ROM 做 matrix/rtc/gyro/mp2k 全盘扫描的代价，属性能优化项。
+
+### 0.2 2-D 待决架构议题（等真机验证通过后再定）
+
+> **决策原则（用户明确）**：不能因为全量编译（重新生成 `out/cart_slim/*.cpp` + 全量重编）费时间，
+> 就牺牲代码架构的合理性。但同样不在没有真机证据前动 codegen——性能/改动代价不是否决理由，缺证据才是。
+
+**议题：`yield` 到底该以什么粒度保留？**
+
+1. `yield` 里混着两类东西：**采样/检查类**（host 栈预算 guard、断点、trace、hang watchdog、PC 采样器）与
+   **契约类**（VBlank present hook、halt 交还信号、session 推进）。SLIM 一刀切全删，第二类被连带删除。
+2. 删除 SLIM 的那个 per-instruction 调用本身**是合理的**：裸机无调度器可切，第一类在设备上本来就不生效
+   （栈 guard 被 `host_stack_guard_supported()` 与「未 arm 时 inert」双重关掉）。真正的失误不是「删 yield」，
+   而是**删除时没有把「卡带没有 yield 点 ⇒ 出帧/HALT 推进/栈水位全部由宿主循环负责」这个隐式契约显式化**，
+   导致 `pump_idle` 和 present hook 变成「host runner 恰好放在那儿」的巧合依赖。
+3. 结论：**不要「保留 `yield` 只删第一类」**——成本主体是那个无法内联的 per-instruction 函数调用（留空壳也照付），
+   而第二类的需求频率是 60 Hz 级，与每指令相差约 20 万倍；第一类在设备上又本来就是空的。两头都不占。
+   正确切法是**按「钩子需要的触发频率」分层**，而不是按「第几类」切。
+4. 关键限制：SLIM 下 `yield` **无法级联展开**。上游的展开协议依赖「每个函数在指令边界重新命中 yield 并返回」
+   才能层层退回 exec loop；SLIM 只留函数入口检查，返回 true 后调用者会继续执行自己的下一条指令，级联断了。
+   因此**栈保护若确实需要，必须是 codegen 上新增一个粗粒度插入点（回边/基本块），属于新机制，不是「恢复旧 yield」**。
+5. 暂定路线：宿主循环负责 present / HALT 推进 /（未来）栈水位，并在该循环上方维护一份显式契约清单。
+   **触发重新决策的实证条件**：真机出现深调用链卡死或栈溢出，或出现某个必须在中途（非 dispatch 边界）触发的钩子。
+
+### 0.3 Phase 2-D 第三次烧录（2026-11-13 09:36，COM14）— HALT 修复验证通过，卡带入口 miss 暴露
+
+**HALT 死锁修复：验证通过**（`窗口1_COM14_(2026-11-13-09-36-52)_ui.log`）
+
+- `hal` 在 0/1 之间交替，`idle` 持续增长（t=6.8 s 时 5,089 → t=38.8 s 时 132,262，≈4 k/s），`cyc` 前移（1,002,815 → 49,786,352）。
+- `[gba] frame 60 / 120` 与 `vblank=60 / 120` 一一对应，无重复无遗漏；`irqd` 恒 0。
+- BIOS 越过 `0x344`（写 HALTCNT）/`0x348` 继续执行：`0x1C4A → 0x2C20…0x2C58 → 0x1DC4…0x218E`（BIOS 开场/卡带检测区），
+  之后 31 s 内不再出现新入口，PC 在 `0x348` 与 `0x1E30–0x2148` 之间跳变 ⇒ 在开场循环里按帧等待 VBlank，属正常推进而非卡死。
+
+**速度**：墙钟 34 s（t=4763→38797）推进 48.78 M 周期 = 2.91 s GBA 时间 = 174 帧 ⇒ **≈5.1 fps（8.6% 实时）**。
+每帧约 740 次 pump，每次 pump ≈364 周期 / ≈251 µs 墙钟。属后续性能项，非本轮范围。
+
+**关键发现：复位前残留行是「dispatch miss 硬停」，不是「0.31 fps 慢跑」**
+
+残留行 `t=864624 pc=08000000 … vbl=270 cyc=75997993 disp=262 idle=210033` 的特征是**计数器全部停住**
+（disp 262、vbl 270、cyc 76.0 M = 4.53 s guest）而 `dbg` 仍每秒打印 ⇒ 主线程已死在 `halt()`，
+1 Hz 状态定时器在 RT-Thread timer 线程里继续打印。证据链：
+
+| 环节 | 事实 | 来源 |
+|------|------|------|
+| BIOS 交棒地址 | `0x30: mov r12,#0x08000000`、`0xCC: moveq r14,#0x08000000` | `out/bios/bios_recompiled.cpp` |
+| 卡带派发表 | 首项 `0x080000C0 → gf_start_vector`（`0x080000C4` resume=1），**无 0x08000000** | `out/cart_slim/dispatch_table.cpp`、`out/cart/dispatch_table.cpp`（两者一致，非 slim 造成） |
+| ROM 导言 | 前 4 字节 `2E 00 00 EA` = ARM `B` → `0x080000C0` | ROM 文件 |
+| 设备侧 miss 处理 | `FATAL dispatch miss at pc=…` + 死循环 | `src/gba_device_stubs.cpp:37-40` |
+| 生成器默认入口 | `--entry` 默认 `0x080000C0`（导言被视为 trampoline，不生成函数） | `tools/gba_recompile/main.cpp` |
+
+⇒ 上一轮在 cyc≈76.0 M（≈帧 270，约 t≈55 s）交棒到 `0x08000000` 时直接 FATAL 停住，之后约 800 s 都是假死。
+本轮同一条预测：日志到 t≈58 s 应出现 `[gba] FATAL dispatch miss at pc=08000000`（当前日志止于 t≈39 s，尚未到）。
+
+**修正前一版判断**：不存在「0.31 fps 的性能骤降」，那是硬停后的冻结快照；性能结论只有本轮实测的 ≈5.1 fps。
+
+**取证结果（2026-11-13 09:48，同一固件复位后）**：预测完全命中。
+`09:48:27.596 [gba] FATAL dispatch miss at pc=08000000`，紧接着的三条 `dbg` 全部是
+`pc=08000000 vbl=270(+0) cyc=75997993 disp=262 idle=210033`——`vbl/cyc/disp/idle` 一起冻结、而 `dbg` 仍每秒打印，
+与「主线程死在 `halt()`、1 Hz 状态定时器在 RT-Thread timer 线程继续打印」的模型一致。
+
+**已实施（方案 A，生成配置修正）**：
+
+1. 新增 `roms/mario_kart_sc.toml`：`[program] load_address=0x08000000 / size=0x400000 / entry_pc=0x080000C0`，
+   `[identity] sha1=9d327c03…0ac56f`（`--config` 会强制校验），并加
+   `[[extra_func]] addr=0x08000000 / mode="arm" / name="cart_rom_entry"`。
+   保留原来的 `0x080000C0` 主入口，只把 ROM 导言补成显式种子——改动落在生成配置，不动 codegen、不在宿主循环里特判。
+2. 重新生成：`GBARECOMP_SLIM=1 gba_recompile --rom … --config roms/mario_kart_sc.toml --out out/cart_slim`，8 shard 自适应。
+   新派发表前三项为 `0x08000000 → gf_cart_rom_entry`、`0x080000C0 → gf_start_vector`、`0x080000C4 → gf_start_vector(resume)`；
+   `gf_cart_rom_entry` 的函数体就是一条 `B`，结尾 `GBARECOMP_TAIL_CALL(gf_start_vector)`。
+3. 全量重编 + 链接完成（2026-11-13 09:58）：`main.bin` 16,343,336 B（+92 B），ROM 分区用 16,232,917 / 16,613,376 B，余 380,459 B。待用户烧录验证。
+
+原始备选（保留备查）。修复目标一致：让 `0x08000000` 进卡带派发表（其内容就是那条 `B`，跳 `0x080000C0`）：
+
+- 方案 A（推荐，架构正确）：`gba_recompile --rom … --entry 0x08000000`，或 game.toml 里 `[[extra_func]] addr = 0x08000000 / mode = "arm"`，重新生成 + 全量重编。
+  理由：`--entry` / `[[extra_func]]` 是工具自带的文档化种子机制，这属于**生成配置缺失**，不应在宿主循环里做特判。
+- 方案 B（廉价但妥协）：宿主 run loop 里识别 `pc == 0x08000000` 的 ARM `B` 并直接跳到目标。省一次全量重编，
+  但把「派发表应该覆盖 ROM 导言」这个生成期问题挪到运行期特判，且会掩盖真实 miss。
+
+### 0.4 Phase 2-D 第四次（2026-11-13 10:33，COM14）— 第二类 miss：数据区函数指针表，转 Tier3 兜底
+
+**现象**：`窗口1_COM14_(2026-11-13-10-33-48)_ui.log` 入口 miss 之后又出现 `dispatch miss at pc=0805F624`。
+
+**定位（不是随机缺项）**：`0x0805F625` 全 ROM 只有一处引用，位于 `0x080F325C`，属于 `0x080F3230–0x080F325C`
+的 13 项函数指针表；同表 9 个目标已编译，4 个没有（`0x0805F624`、`0x0805F63C`、`0x0805F65C`、`0x0805F838`）。
+整张表被静态发现跳过——**数据区的函数指针不是控制流，分析器不扫它就永远发现不了表里的函数**。
+
+**全 ROM 扫描口径与结果**（临时脚本在 `%TEMP%`，不入库）：
+
+| 口径 | 数量 |
+|------|------|
+| 值落在 `[0x08000000, ROM 末尾)` 的 32 位 ROM 字（指针目标） | 9,264 |
+| 连续 ≥3 个指针字的表 / 其中不同目标 / 未入派发表的目标 | 561 段 / 3,356 / 1,967 |
+| 目标在 64 个半字内解码到 `bx lr` / `pop {pc}`（像真函数） | 413 |
+| 目标以 `push {…, lr}` 开头 | 158 |
+
+**「一次性补种子」的否证（实物证据）**：把 413 个写进 `roms/mario_kart_sc.seeds.toml` 后重新生成
+（`--config mario_kart_sc.toml --config mario_kart_sc.seeds.toml`）：
+
+- 派发表 167,911 → 189,504（+21,593 项 ≈ 259 KB），函数 19,805 → 22,905，shard 8 → 16；
+- 代码段增加约 2.6 MB，LINK 阶段 `region 'ROM' overflowed by 2474764 bytes`（当时余量仅 380,459 B）。
+- 原因：每个漏项都是一个调用图根，递归把整片子系统带进来，代价远高于「每个函数几 KB」的直觉。
+- `roms/mario_kart_sc.seeds.toml` 保留作为证据，**不参与生成**。
+
+**结论**：静态枚举不可穷尽（数据表、计算跳转落在函数中间、RAM 代码）。正确修复是让 miss 在运行时降级为
+解释执行——即上游 gbarecomp 的 Stage 1 self-heal（Tier3），而不是要求静态全覆盖。
+
+**体积实测**（`arm-none-eabi-g++ 14.2.1`，`-Os -mcpu=cortex-m33 -mthumb -fno-exceptions -fno-rtti`）：
+`interpreter.cpp` 4,784 B + `thumb_decode.cpp` 2,060 B + `arm_decode.cpp` 1,368 B + `arm_ir.cpp` 1,420 B
+≈ **9.6 KB .text**，与补种子的 2.6 MB 差三个数量级。
+
+**已实施**：
+
+1. 不带 seeds 重新生成：8 shard、19,805 函数，恢复可链接（`main.elf` 已于上一轮因溢出被移入回收站，未恢复）。
+2. [src/SConscript](file:///e:/work/Github/gba_sf32/src/SConscript)：加入 `arm_cpu_bridge.cpp` 与解释器四个源文件；
+   删除 `src/gba_device_stubs.cpp` 里的 `mul_wait_cycles` 存根（改由 `arm_ir.cpp` 提供，避免重复定义）。
+3. [src/gba_device_stubs.cpp](file:///e:/work/Github/gba_sf32/src/gba_device_stubs.cpp)：`runtime_dispatch_miss` 不再 `halt`，
+   改为记录 miss PC（每个 PC 只打印一次）+ 调用设备版 `runtime_bridge_interpret`；bridge 复刻宿主契约：
+   - `stop_pc` = 调用者压入的返回地址（顶层用 LR 兜底）；
+   - SWI → 置返回 PC 后交 `runtime_swi`；每条指令后 `runtime_tick(cycles)` 投递 IRQ；
+   - 回到静态入口且 `runtime_has_static_entry()` 命中即收敛；共享尾声回溯调用栈并裁到匹配帧；
+   - 单次 bridge 上限 5,000 万条指令，跑飞仍 FATAL，不静默挂死。
+4. 保持不变：`overlay_try_dispatch` 恒 0（设备无编译器）；`runtime_unimplemented_op` 仍硬停（那是 codegen 缺口，不是发现盲区）。
+
+**编译结果（2026-11-13 11:17）**：`main.bin` 16,353,256 B（比补入口种子那版 +9,920 B，与解释器 9.6 KB 实测吻合）；
+ROM 分区用 16,242,812 / 16,613,376 B，**余 370,564 B**；`.text` 13,418,288 B、`.rodata` 2,794,180 B；
+仅剩 `g_force_interp` 的 `extern` 初始化告警（既有）与 RWX LOAD 段告警，无未定义符号、无重复定义。
+
+**判读点**：串口出现 `[gba] dispatch miss pc=… -> interpreter` 后不再 FATAL、帧继续推进即通过；
+若出现 `[gba] FATAL bridge …` 才是新问题（解释器缺口或跑飞）。
+
+### 0.5 Phase 2-D 第五次烧录（2026-11-13 12:12，COM14）— 真机出画面，Tier3 验证通过
+
+**结论**：屏幕已显示 Mario Kart SC 游戏画面；§0.4 预测的 `0x0805F624` miss 被 Tier3 接住，不再 FATAL，
+`frame`/`vblank` 持续推进。Phase 2-D（真实 ROM 接入 + dispatch 联动 + miss 自愈）达成。
+
+**证据**（`窗口1_COM14_(2026-11-13-12-12-17)_ui.log`，501 行）：
+
+| 时间 | 事件 |
+|------|------|
+| 12:12:20.804 | `[gba] SF32LB52 GBA runtime, Phase 2-D` |
+| 12:12:23.141 | `cart: "MARIO KART" AMKE, 4194304 B` |
+| 12:12:24.062 | `bus bind (bios+rom) took 924 ms` |
+| 12:12:24.075–25.531 | BIOS 从 reset vector 依次进入 236 个函数入口，无 fault |
+| 12:13:14.543 | `[gba] cart entered: pc=08000000 psr=0000001f mode=1f T=0`（入口种子生效） |
+| 12:13:14.998 | `dispatch miss pc=0805f624 thumb=1 -> interpreter (total 1)`，**无 FATAL** |
+| 12:13:27–30 | 其余 8 个新 miss PC：`0805f76c` / `0805f758` / `0805f780` / `0805f7b0` / `0805f7ec` / `0805f7c4` / `0805f63c` / `0805f7d8` |
+| 12:14:51.672 | `[gba] frame 720 pc=00000348 vblank=741` |
+| 12:14:53.167 | `dbg t=152906 … irqd=0 hal=1 cart_ent=240613 disp=1671 idle=5` |
+
+**Tier3 有效性**：
+
+- 9 个 distinct miss PC，累计 51 次后不再增长（`total` 停在 51）⇒ 每个漏项只在首次进入时走解释器，
+  收敛回静态入口后不再重复解释，不是「每条指令都靠解释器」。
+- 全程无 `[gba] FATAL bridge …`：既无解释器缺口（Undefined/NotImplemented），也无跑飞触发 5,000 万指令上限。
+- 9 个 PC 全落在 `0x0805F6xx–0x0805F7xx`，即 §0.4 定位的 `0x080F3230` 函数指针表的同一片目标区，
+  与静态扫描给出的「该表 13 项中 4 项未编译」判断吻合；运行期实际共暴露 9 个（含表外相邻漏项）。
+
+**运行状态**：
+
+- `frame 60 → 720`、`vblank 60 → 741` 单调递增，无卡死；`pc` 在卡带代码（`08000a06` / `0802fd9e` / `0803058c`）
+  与 BIOS HALT 续跑点 `00000348` 之间往返；出现 `pc=03002424`（IWRAM，`0x03000000+`）说明游戏在 RAM 中
+  执行/自拷贝代码，属真实行为而非跑飞。
+- `irqd=1` 周期性出现（`psr=…b2 mode=12` 即 IRQ 模式），VBlank IRQ 链正常；`hal` 0/1 交替，HALT 泵持续工作。
+- `cart_ent` 8,515（12:13:14）→ 240,613（12:14:53），卡带入口调用持续发生。
+
+**性能**：`t=4758 → 152906`（148.1 s 墙钟），`cyc` 1,029,120 → 210,010,192（Δ≈208.98 M guest 周期）
+⇒ ≈1.41 MHz guest ≈ **8.4% 实时**；744 guest 帧 / 148.1 s ≈ **5.0 fps**。
+与 §0.3「仅 BIOS」阶段（≈5.1 fps）基本持平 ⇒ Tier3 不在热路径上，无可测回退。实时性能仍留待后续阶段。
+
+**后续**：
+
+1. Phase 2-D 关闭；标记条件「屏幕出现真实游戏画面」已满足。
+2. 不再补种子、不改 codegen；miss 交给 Tier3 是可持续方案（体积 ≈9.6 KB，ROM 余 370,564 B）。
+3. 下一步候选由用户定：Phase 3（音频/按键/存档）或先做性能（当前 ≈5 fps，目标实时）。
 
 ## 1. 硬件确认（锁定）
 
@@ -477,7 +675,7 @@ gba_recompile.exe --rom "roms\Mario Kart Super Circuit (U).gba" --out out\cart_s
 | 2-A | 仓库根独立 scons 工程骨架，能编出可烧录固件 | ✅ 编译通过 |
 | 2-B | 显示后端：LCD 中央 240×160 写 RGB565 彩条 | ✅ 已烧录验证（当时看到的「滚动彩条」实为 165×15 的坐标 bug，见 2-C 修复） |
 | 2-C | runtime 移植（`src/gba/*` + `runtime_arm.cpp` + `runtime_bus_bridge.cpp` 编入工程） | ✅ 真机跑通，居中 240×160 已复烧确认 |
-| 2-D | 接上卡带：小测试 ROM 验证 cart → dispatch → PPU → 送屏链路 | ⏳ 方案已定，未编码 |
+| 2-D | 接上卡带：cart → dispatch → PPU → 送屏链路 | 🚧 HALT 泵 + 宿主出帧已验证；卡带交棒 `0x08000000` 曾 miss（已取证），现已在生成配置补种子并重编（`main.bin` 16,343,336 B），待烧录验证（详见 §0.3） |
 | 2-E | 真实 ROM 接入：容量优化（dispatch 压缩 / -Oz / ROM LZ4）+ 端到端验证 | ⏳ 未开始 |
 | 2-F | 按键 / 音频 / 存档 | ⏳ 未开始（Phase 3） |
 

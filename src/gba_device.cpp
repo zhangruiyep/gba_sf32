@@ -16,19 +16,17 @@
 #include <functional>
 #include <new>
 
+#include <rtthread.h>
+
 #include "runtime_arm.h"          // g_cpu, runtime_dispatch, g_runtime_fn_entry_hook
 #include "runtime_bus_bridge.h"   // gbarecomp::set_active_bus / set_active_ppu
 #include "gba_bios.h"
 #include "gba_bus.h"
 #include "gba_ppu.h"
 
-extern "C" void rt_kprintf(const char *fmt, ...);
-
 // RT-Thread's operator new returns nullptr instead of throwing, so an oversized
 // std::vector inside the runtime shows up as a null-pointer fault with no hint.
 // Print the heap high-water mark around each bring-up step.
-extern "C" void rt_memory_info(unsigned long *total, unsigned long *used,
-                               unsigned long *max_used);
 
 // src/gba_psram.c: external PSRAM arena that backs the runtime's cold buffers.
 extern "C" std::size_t gba_psram_used(void);
@@ -55,6 +53,11 @@ extern "C" void gba_lcd_present(const uint8_t *rgb888, uint32_t width, uint32_t 
 void runtime_set_frame_present_hook(std::function<bool()> hook);
 void runtime_mark_present_stack_base();
 
+// Depth of IRQ handlers currently on the host stack (runtime_arm.cpp). The
+// frame-present gate inside runtime_should_yield() requires it to be zero, so
+// a stuck non-zero value silently disables presentation.
+extern "C" uint32_t g_irq_nest_depth;
+
 namespace {
 
 constexpr uint32_t kCartBase = 0x08000000u;
@@ -71,14 +74,72 @@ uint8_t  g_bios_seen[kBiosSize / 4u / 8u];
 uint32_t g_bios_entries = 0;
 uint32_t g_frames = 0;
 
+// ── Phase 2-D bring-up probes (temporary) ───────────────────────────────
+// The frame-present hook is only reachable from runtime_should_yield(), which
+// slim codegen strips from the cartridge entirely, so guest code can never
+// present a cart frame. These counters show whether the guest is advancing:
+//   cart_ent -> does the guest ever execute cartridge code (entry hook)
+//   disp     -> does control return to the host dispatch loop
+//   idle     -> host-side HALT pumps (guest has no code to run until an IRQ)
+//   hal/irqd -> is the CPU parked in HALT, or is an IRQ chain stuck on our stack
+uint32_t g_cart_entries = 0;
+uint32_t g_dispatch_returns = 0;
+uint32_t g_idle_pumps = 0;
+rt_uint32_t g_last_status_tick = 0;
+unsigned int g_last_status_vblank = 0;
+unsigned int g_presented_vblank = 0;
+
+void debug_status(void *parameter)
+{
+    (void)parameter;
+
+    const rt_uint32_t now = rt_tick_get();
+    const unsigned int vbl = (unsigned int)g_runtime_vblank_starts;
+    const uint32_t psr = g_cpu.cpsr;
+
+    gbarecomp::RuntimeTimingContext timing;
+    gbarecomp::runtime_capture_timing_context(timing);
+
+    // rt_kprintf has no %ll, so every 64-bit counter is narrowed to 32 bits;
+    // all of these stay far below 2^32 during a bring-up window.
+    rt_kprintf("[gba] dbg t=%u pc=%08x psr=%08x mode=%02x T=%u vbl=%u(+%u) cyc=%u irqd=%u hal=%u cart_ent=%u disp=%u idle=%u frame=%u\n",
+               (unsigned int)now, g_cpu.R[15], psr,
+               (unsigned int)(psr & 0x1Fu), (unsigned int)((psr >> 5) & 1u),
+               vbl, vbl - g_last_status_vblank,
+               (unsigned int)timing.cycles, (unsigned int)g_irq_nest_depth,
+               (unsigned int)(g_bus->io().halted() ? 1u : 0u),
+               (unsigned int)g_cart_entries, (unsigned int)g_dispatch_returns,
+               (unsigned int)g_idle_pumps, (unsigned int)g_frames);
+
+    g_last_status_tick = now;
+    g_last_status_vblank = vbl;
+}
+
+// Runs on the soft-timer thread, so it keeps reporting even when the guest
+// never yields back to the host loop.
+void debug_status_start(void)
+{
+    rt_timer_t timer = rt_timer_create("gba_dbg", &debug_status, RT_NULL, 1000u,
+                                       RT_TIMER_FLAG_PERIODIC | RT_TIMER_FLAG_SOFT_TIMER);
+    if (timer == RT_NULL)
+    {
+        rt_kprintf("[gba] dbg timer create failed\n");
+        return;
+    }
+
+    g_last_status_tick = rt_tick_get();
+    g_last_status_vblank = g_runtime_vblank_starts;
+    rt_timer_start(timer);
+}
+
 void print_heap(const char *stage)
 {
-    unsigned long total = 0;
-    unsigned long used = 0;
-    unsigned long max_used = 0;
+    rt_uint32_t total = 0;
+    rt_uint32_t used = 0;
+    rt_uint32_t max_used = 0;
 
     rt_memory_info(&total, &used, &max_used);
-    rt_kprintf("[gba] heap %s: total=%lu used=%lu max=%lu\n",
+    rt_kprintf("[gba] heap %s: total=%u used=%u max=%u\n",
                stage, total, used, max_used);
     rt_kprintf("[gba] psram %s: used=%u of %u\n", stage,
                (unsigned int)gba_psram_used(),
@@ -122,6 +183,18 @@ void bios_entry_hook(uint32_t pc)
 {
     if (pc >= kBiosSize)
     {
+        // The hook also fires from every generated cartridge function, so this
+        // proves whether the guest ever got past the BIOS hand-off.
+        if (pc >= kCartBase)
+        {
+            if (g_cart_entries == 0u)
+            {
+                rt_kprintf("[gba] cart entered: pc=%08x psr=%08x mode=%02x T=%u\n",
+                           pc, g_cpu.cpsr, (unsigned int)(g_cpu.cpsr & 0x1Fu),
+                           (unsigned int)((g_cpu.cpsr >> 5) & 1u));
+            }
+            ++g_cart_entries;
+        }
         return;
     }
 
@@ -165,18 +238,26 @@ void reset_cpu(void)
     g_cpu.banked_sp[ARM_BANK_USER]       = 0x03007F00u;
 }
 
-// Called at VBlank start with the guest stack left in place.
+// Called at VBlank start with the guest stack left in place, and from the host
+// loop after each step. One panel update per VBlank, whoever gets there first.
 bool present_frame(void)
 {
-    if (g_ppu == nullptr)
+    if (g_ppu == nullptr || !g_ppu->has_latched_framebuffer())
     {
         return false;
     }
 
+    const unsigned int vbl = (unsigned int)g_runtime_vblank_starts;
+    if (vbl == g_presented_vblank)
+    {
+        return false;
+    }
+    g_presented_vblank = vbl;
+
     if ((++g_frames % 60u) == 0u)
     {
-        rt_kprintf("[gba] frame %u pc=%08x vblank=%llu\n",
-                   g_frames, g_cpu.R[15], g_runtime_vblank_starts);
+        rt_kprintf("[gba] frame %u pc=%08x vblank=%u\n",
+                   (unsigned int)g_frames, g_cpu.R[15], vbl);
     }
 
     gba_lcd_present(g_ppu->latched_framebuffer(),
@@ -226,8 +307,11 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     }
     print_heap("after cart load");
 
+    const rt_uint32_t bus_tick = rt_tick_get();
     g_bus->set_bios(&g_bios);
     g_bus->set_rom(cart, cart_size);
+    rt_kprintf("[gba] bus bind (bios+rom) took %u ms\n",
+               (unsigned int)(rt_tick_get() - bus_tick));
     g_bus->io().set_ppu(g_ppu);
     g_bus->io().set_bus(g_bus);
 
@@ -241,15 +325,49 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     reset_cpu();
 
     rt_kprintf("[gba] BIOS loaded, booting from reset vector %08x\n", g_cpu.R[15]);
+    debug_status_start();
 
     for (;;)
     {
-        const uint32_t pc = g_cpu.R[15];
-        if ((cart == nullptr) && (pc >= kCartBase))
+        if (g_bus->io().halted())
         {
-            break;
+            // HALTed CPU: there is no code to run until an IRQ arrives, and the
+            // IRQ can only arrive if time advances. Re-dispatching the halt
+            // continuation point would spin forever (the BIOS parks at 0x348
+            // right before the cartridge hand-off). Mirror pump_idle() from the
+            // host runner: advance to the next device event so VBlank vectors.
+            uint32_t chunk = g_ppu->cycles_until_next_event();
+            const uint32_t until_timer = g_bus->io().cycles_until_next_timer_event();
+            const uint32_t until_sample = g_bus->audio().cycles_until_next_shared_event();
+            if (until_timer < chunk)
+            {
+                chunk = until_timer;
+            }
+            if (until_sample < chunk)
+            {
+                chunk = until_sample;
+            }
+            if (chunk == 0u || chunk == 0xFFFFFFFFu)
+            {
+                chunk = 1u;
+            }
+            runtime_tick(chunk);
+            ++g_idle_pumps;
         }
-        runtime_dispatch(pc);
+        else
+        {
+            const uint32_t pc = g_cpu.R[15];
+            if ((cart == nullptr) && (pc >= kCartBase))
+            {
+                break;
+            }
+            runtime_dispatch(pc);
+            ++g_dispatch_returns;
+        }
+
+        // Slim codegen strips runtime_should_yield() from the cartridge, so the
+        // guest-side frame hook never fires for cart code: present from here.
+        present_frame();
     }
 
     rt_kprintf("[gba] BIOS left the ROM: pc=%08x, %u BIOS entries traced, %u frames\n",
