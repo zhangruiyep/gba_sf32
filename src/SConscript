@@ -92,7 +92,14 @@ group = DefineGroup('gba_app', app_src, depend=[''], CPPPATH=app_cpppath,
                     CPPDEFINES=runtime_cppdefines)
 
 # ── gbarecomp runtime (GBA machine + ARM recompiled BIOS) ────────────────
-runtime_src = sorted(glob.glob(os.path.join(gbarecomp_src, 'gba', '*.cpp')))
+# gba_ppu.cpp is split out below so it can be built at -O2: its scanline
+# compositor is the hottest code in the emulator and the innermost loop runs
+# through small lambdas (submit/layer_enabled/blend_enabled) that the project
+# wide -Oz refuses to inline.
+ppu_src = [os.path.join(gbarecomp_src, 'gba', 'gba_ppu.cpp')]
+runtime_src = [src for src in
+               sorted(glob.glob(os.path.join(gbarecomp_src, 'gba', '*.cpp')))
+               if src not in ppu_src]
 runtime_src += [
     os.path.join(gbarecomp_src, 'armv4t', 'runtime_arm.cpp'),
     os.path.join(gbarecomp_src, 'armv4t', 'symbol_lookup.cpp'),
@@ -137,5 +144,11 @@ runtime_cpppath = [
 
 group += DefineGroup('gba_runtime', runtime_src, depend=[''], CPPPATH=runtime_cpppath,
                      CPPDEFINES=runtime_cppdefines)
+
+# building.py appends LOCAL_CCFLAGS after CCFLAGS, so the trailing -O2 wins over
+# the global -Oz for this file only. Deliberately one file: the 0xFD8000 main
+# partition has ~250 KB of headroom and -O2 on the whole runtime would not fit.
+group += DefineGroup('gba_ppu', ppu_src, depend=[''], CPPPATH=runtime_cpppath,
+                     CPPDEFINES=runtime_cppdefines, LOCAL_CCFLAGS=' -O2')
 
 Return('group')

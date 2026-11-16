@@ -1,6 +1,6 @@
 # GBA ROM 重编译到思澈黄山派 实施计划
 
-> 最后更新：2026-11-13
+> 最后更新：2026-11-16
 
 ## 0. 当前状态总览
 
@@ -11,7 +11,7 @@
 | Phase 2-A | 仓库根独立 scons 工程骨架 | ✅ 编译通过（`main.bin` 325,240 B） |
 | Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（当时的「滚动彩条」实为 165×15 坐标 bug，已在 2-C 修复） |
 | Phase 2-C | runtime 移植到 SiFli HAL | ✅ 完成并真机验证（BIOS 从 reset vector 跑到空闲态，236 个函数入口，无 fault；修复送屏几何后居中 240×160 白块，2026-11-11 复烧确认） |
-| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.3。性能测量进行中（≈4.6 fps / 8% 实时），见 §0.4 |
+| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.3。性能优化中（2026-11-16：≈7.2 fps / 13.9% 实时），见 §0.4–§0.5 |
 | Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 模板表去重） | 📋 候选已归档（见 §3.2.4）。2-D 未超限（ROM 余 371,910 B），非阻塞；Tier3 已使补种子路线不再必要，是否实施待定 |
 | Phase 3 | 音频 / 按键 / 存档 | ⏳ 未开始 |
 
@@ -158,6 +158,58 @@ scons --board=sf32lb52-lchspi-ulp -j8
 
 **等待中**：用户烧录后取 1–2 分钟（进赛道）日志，按上表定位后再决定改哪一层；探针数据出来前不动优化代码。
 工作区状态：`src/gba_device.cpp` / `src/main.c` 含探针、本文件含本节，三者**均未提交**（最近提交 `0c60681`）。
+
+### 0.5 性能：-Oz 根因与 `gba_ppu.cpp` 单文件 -O2（2026-11-16）
+
+**基线（B 组，`...14-38-43_ui.log`，关片上显存）**：帧 540–780（MK 菜单）`wall 9.67–10.24 s/60f`、
+`render 4602–4712 ms`（`bg 3229–3340`、`out ~895`、`prep 312`、`obj 108`）；
+帧 ≥1020 换场景后 `bg 6242–6250`、`render 8325 ms`、`wall 14.1 s/60f`。
+
+**根因**：`build_.../compile_commands.json` 显示所有 runtime 源文件都吃 SDK 全局 `-Oz`。
+-Oz 会关掉 GCC 几乎所有内联启发式，而 `render_scanline_impl` 的内层全是 lambda / helper
+（`submit`、`layer_enabled`、`blend_enabled`、`load_u16_le`）；`prep` 与 `out` 两阶段的开销形态
+正是「调用没内联 + 每像素走内存」的典型特征。
+
+**改动**：`src/SConscript` 把 `gba_ppu.cpp` 从 `gba_runtime` 的 glob 结果剔除，单独
+`DefineGroup('gba_ppu', ..., LOCAL_CCFLAGS=' -O2')`。`building.py` 的 `local_group()` 把
+`LOCAL_CCFLAGS` 拼在全局 `CCFLAGS` 之后，GCC 后者覆盖前者 ⇒ 实际命令为 `-Oz ... -O2`，
+只有这一个文件走 -O2。只放一个文件是因为 `0xFD8000` 分区余量有限（`main.bin` 16,367,452 B，
++4,892 B；链接表 ROM 余 356,222 B）。
+
+**A/B 结果（`...15-10-14_ui.log`，帧 540–780 同场景）**：
+
+| 阶段 | -Oz | -O2 | 变化 |
+|------|-----|-----|------|
+| `bg` | 3229–3340 ms | 2567–2741 ms | -18% |
+| `out` | ~895 ms | 499–509 ms | -43% |
+| `prep` | ~312 ms | 184–186 ms | -41% |
+| `obj` | ~108 ms | 93–94 ms | -13% |
+| `render` | 4602–4712 ms | 3400–3575 ms | -25% |
+| `wall` | 9.67–10.24 s | 7.99–8.57 s | -16% |
+
+重场景（帧 ≥1020）：`bg` 6242→5144、`render` 8325→6567、`wall` 14.1→11.9 s。
+
+**现状归属（139 ms/帧）**：`disp` 57（guest AOT 执行，不在 -O2 覆盖范围）｜`halt` 78
+（其中 `render` 58 = `bg` 44 + `out` 8.4 + `prep` 3.1 + `obj` 1.6；`audio` 6；`ppu` tick 3.9；`vbl` 3.9）｜
+`pres` 3。
+
+**`bg` 剩余 44 ms 的判读**：每层每行实测 ≈17,131 cyc。代码结构上 4bpp 每个 8 像素 run 有 1 次
+map 读 + 4 次 tile 字节读（`cached_addr` 只在 run 内复用），再加每像素片上调色板读与 `submit`；
+按 `mem bench` 的 PSRAM 70.5 cyc/次 × ≈150 次/层行 ≈ 10,500 cyc，与实测同量级 ⇒ **bg 大半耗在
+VRAM 的 PSRAM 往返**上。
+
+**待验证疑点**：`GBARECOMP_ONCHIP_DISPLAY_MEM=y` 那组与关闭组的 `bg`/`obj` 完全一致
+（3207–3336 vs 3229–3340；109 vs 108）。96 KB 数组整体换到片上不可能零变化，怀疑那次构建的宏
+没进 `CPPDEFINES`（唯一证据是构建日志里的 `[gba] runtime features:` 行，已丢失）。若宏真的生效，
+按上条估算 `bg` 应约为一半（~1400 ms/60f）。
+
+**下一步（按顺序）**：
+1. 打开 `CONFIG_GBARECOMP_ONCHIP_DISPLAY_MEM`，构建后**先核对** `[gba] runtime features:` 含该宏，
+   再烧录对比 `bg`。RAM 侧余 244,772 B，96 KB VRAM + 2 KB 放得下。
+2. 4bpp tile 行改 32 位读：`tile_row = char_base + tile*32 + py*4` 天然 4 字节对齐，一次
+   `load_u32_le` 出 8 像素，每层行可省 ≈90 次 PSRAM 读（不依赖片上显存）。
+3. 以上都不动时，再考虑 `disp`（guest 执行，57 ms/帧）侧：`runtime_bus_bridge.cpp` 等放开 -O2
+   的体积/收益比不如前两条。
 
 ## 1. 硬件确认（锁定）
 
