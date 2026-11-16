@@ -113,6 +113,36 @@ index 17a5b06..73c499a 100644
      return static_cast<uint16_t>((b << 10) | ((g6 >> 1) << 5) | r);
  }
  
+diff --git a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
+index 72ca9ec..da73969 100644
+--- a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
++++ b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
+@@ -25,6 +25,7 @@
+ 
+ #include "audio_shadow.h"
+ #include "gba_m4a.h"
++#include "psram_alloc.h"
+ 
+ namespace gba {
+ 
+@@ -114,8 +115,15 @@ private:
+     uint64_t last_hook_cursor_ = 0;
+     uint8_t  reverb_ = 0;
+     uint8_t  dma_period_ = 7;
+-    std::vector<std::pair<float, float>> ring_ =
+-        std::vector<std::pair<float, float>>(kFrame * 16, {0.0f, 0.0f});
++    // ~137 KB of delay history. With VRAM/OAM/palette bound to on-chip SRAM
++    // the SRAM heap is only ~178 KB, so the default allocator returns NULL for
++    // this vector and the zero-fill faults at address 0 during bring-up.
++    // Serve it from the PSRAM arena, like GbaAudio's capture ring: it is
++    // touched only on the shadow render path, once per grid sample.
++    using RingSample = std::pair<float, float>;
++    std::vector<RingSample, PsramAllocator<RingSample>> ring_ =
++        std::vector<RingSample, PsramAllocator<RingSample>>(kFrame * 16,
++                                                           {0.0f, 0.0f});
+     std::size_t ring_pos_ = 0;
+     ShadowVerifier vf_{};
+     uint8_t  count_mode_ = 0;
 diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
 index d9d1604..7bce86d 100644
 --- a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
