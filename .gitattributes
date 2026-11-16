@@ -1,0 +1,2 @@
+# 补丁文件必须保持 LF，否则 core.autocrlf=true 下 git apply 会因 CRLF 失配
+*.patch text eol=lf

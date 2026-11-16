@@ -1,0 +1,814 @@
+diff --git a/third_party/gbarecomp-main/src/armv4t/runtime_arm.cpp b/third_party/gbarecomp-main/src/armv4t/runtime_arm.cpp
+index bb2b654..c31ced1 100644
+--- a/third_party/gbarecomp-main/src/armv4t/runtime_arm.cpp
++++ b/third_party/gbarecomp-main/src/armv4t/runtime_arm.cpp
+@@ -82,7 +82,13 @@ gbarecomp::RuntimeArmContext* g_resumable_context = nullptr;
+ bool g_return_yield = false, g_dispatch_suspended = false;
+ std::uint32_t g_suspended_pc = 0;
+ 
++// 4096 entries x 72 B = 288 KiB of .bss. Bare-metal targets that only need
++// the "recent events" tail shrink it via GBARECOMP_SMALL_TRACE_RING.
++#ifdef GBARECOMP_SMALL_TRACE_RING
++constexpr uint32_t kTraceSize = 64u;
++#else
+ constexpr uint32_t kTraceSize = 4096u;
++#endif
+ RuntimeTraceEntry g_trace[kTraceSize] = {};
+ uint32_t g_trace_write = 0;
+ uint32_t g_trace_count = 0;
+diff --git a/third_party/gbarecomp-main/src/gba/gba_audio.h b/third_party/gbarecomp-main/src/gba/gba_audio.h
+index e1942f4..b2c11c2 100644
+--- a/third_party/gbarecomp-main/src/gba/gba_audio.h
++++ b/third_party/gbarecomp-main/src/gba/gba_audio.h
+@@ -26,6 +26,7 @@
+ 
+ #include "gba_m4a.h"
+ #include "mp2k_shadow.h"
++#include "psram_alloc.h"
+ 
+ namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
+ 
+@@ -99,7 +100,14 @@ public:
+         int16_t direct_a = 0;  // Direct-Sound FIFO A raw byte for this slot
+         int16_t direct_b = 0;  // Direct-Sound FIFO B raw byte for this slot
+     };
++    // 262144 entries x 14 B = 3.5 MiB. Device builds that enable
++    // GBARECOMP_PSRAM_ALLOC keep this depth and place the ring in PSRAM;
++    // targets without external memory shrink it to a short window.
++#ifdef GBARECOMP_SMALL_AUDIO_CAPTURE
++    static constexpr std::size_t kCapRingSize = 1u << 10;  // 1024 (~32 ms @32k)
++#else
+     static constexpr std::size_t kCapRingSize = 1u << 18;  // 262144 (~8 s @32k)
++#endif
+ 
+     // Earliest absolute sample index still retained in the capture ring.
+     uint64_t capture_oldest_index() const {
+@@ -324,7 +332,9 @@ private:
+ 
+     // Always-on capture ring (see CapSample / query_capture above). Indexed
+     // by (absolute sample index % kCapRingSize). Allocated lazily on reset.
+-    std::vector<CapSample> cap_ring_;
++    // It is the largest buffer in the machine and nothing in the mixer reads
++    // it, so bare-metal builds keep it in external PSRAM.
++    std::vector<CapSample, PsramAllocator<CapSample>> cap_ring_;
+     void cap_push(const CapSample& s);
+     int16_t current_samples_[kMaxSamplesPerEvent] = {};
+     uint8_t current_sample_rates_[kMaxSamplesPerEvent] = {};
+diff --git a/third_party/gbarecomp-main/src/gba/gba_bus.h b/third_party/gbarecomp-main/src/gba/gba_bus.h
+index f3f69c4..308d607 100644
+--- a/third_party/gbarecomp-main/src/gba/gba_bus.h
++++ b/third_party/gbarecomp-main/src/gba/gba_bus.h
+@@ -76,6 +76,20 @@ struct BusWriteObserver {
+     virtual void on_bus_read(uint32_t /*addr*/) {}
+ };
+ 
++// Display memories, kept in on-chip SRAM rather than inside the PSRAM arena
++// that holds the rest of the bus. The PPU samples VRAM/OAM/palette several
++// times per pixel, so on this target each of those loads otherwise costs a
++// PSRAM round trip (~70 cycles) plus a D-Cache line evicted by the very next
++// access. On-chip SRAM answers in a few cycles and never evicts anything.
++// The guest only ever reaches these through the bus region handlers, so the
++// relocation is invisible to emulated code.
++// GBARECOMP_ONCHIP_DISPLAY_MEM (Kconfig.proj) selects this layout.
++#if defined(GBARECOMP_ONCHIP_DISPLAY_MEM)
++inline std::array<uint8_t, 96 * 1024> g_onchip_vram{};
++inline std::array<uint8_t,        1024> g_onchip_pal{};
++inline std::array<uint8_t,        1024> g_onchip_oam{};
++#endif
++
+ class GbaBus : public MemoryBus {
+ public:
+     GbaBus();
+@@ -362,9 +376,16 @@ private:
+ 
+     std::array<uint8_t, 256 * 1024> ewram_{};
+     std::array<uint8_t,  32 * 1024> iwram_{};
++#if defined(GBARECOMP_ONCHIP_DISPLAY_MEM)
++    // See g_onchip_vram above: display memories are bound to on-chip storage.
++    std::array<uint8_t,        1024>& pal_  = g_onchip_pal;
++    std::array<uint8_t,  96 * 1024>& vram_ = g_onchip_vram;
++    std::array<uint8_t,        1024>& oam_  = g_onchip_oam;
++#else
+     std::array<uint8_t,        1024> pal_{};
+     std::array<uint8_t,  96 * 1024> vram_{};
+     std::array<uint8_t,        1024> oam_{};
++#endif
+ 
+     GbaIo       io_dispatch_;
+     GbaAudio    audio_;
+diff --git a/third_party/gbarecomp-main/src/gba/gba_color.h b/third_party/gbarecomp-main/src/gba/gba_color.h
+index 17a5b06..73c499a 100644
+--- a/third_party/gbarecomp-main/src/gba/gba_color.h
++++ b/third_party/gbarecomp-main/src/gba/gba_color.h
+@@ -31,9 +31,9 @@ inline uint16_t blend_alpha_gba555(uint16_t top,
+     // the 4-bit division), and carries a sixth green precision bit in palette
+     // bit 15. Only after blending is green reduced to the displayed 5 bits.
+     // Doing this on already-expanded RGB888 values produces subtly wrong colors.
+-    const uint32_t r = std::min(31u, (tr * eva + br * evb + 8u) >> 4);
+-    const uint32_t g6 = std::min(63u, (tg * eva + bg * evb + 8u) >> 4);
+-    const uint32_t b = std::min(31u, (tb * eva + bb * evb + 8u) >> 4);
++    const uint32_t r = std::min<uint32_t>(31u, (tr * eva + br * evb + 8u) >> 4);
++    const uint32_t g6 = std::min<uint32_t>(63u, (tg * eva + bg * evb + 8u) >> 4);
++    const uint32_t b = std::min<uint32_t>(31u, (tb * eva + bb * evb + 8u) >> 4);
+     return static_cast<uint16_t>((b << 10) | ((g6 >> 1) << 5) | r);
+ }
+ 
+diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
+index d9d1604..7bce86d 100644
+--- a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
++++ b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
+@@ -28,6 +28,37 @@ static uint64_t ordered_wide_text_span_test_jobs = 0;
+ extern "C" uint64_t gba_ordered_wide_text_span_test_jobs() { return ordered_wide_text_span_test_jobs; }
+ #endif
+ 
++// Per-scanline palette snapshot (GBARECOMP_PPU_ONCHIP_SCRATCH). Every visible
++// pixel of every layer fetches a palette entry, and on this target those
++// fetches are PSRAM round trips (see the memory bench in src/gba_device.cpp).
++// The palette is 1 KiB, so it is copied once per line into on-chip SRAM and
++// sampled from there instead.
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++static uint8_t g_line_palette[1024];
++#endif
++
++// Temporary render-phase split (DWT cycles), accumulated per scanline:
++// 0 prepare/window setup, 1 BG sampling, 2 foreign overlay, 3 OBJ sampling,
++// 4 final output. Printed by src/gba_device.cpp; delete with its other probes.
++// GBARECOMP_PERF_PROBES (Kconfig.proj) compiles the whole split out.
++#if defined(GBARECOMP_PERF_PROBES)
++extern "C" {
++unsigned g_ppu_phase_cyc[5] = {};
++unsigned g_ppu_phase_cyc_rows = 0;
++}
++static inline uint32_t ppu_cyc(void)
++{
++    return *(volatile uint32_t *)0xE0001004u;   // DWT->CYCCNT
++}
++#define PPU_PHASE_STAMP(name) const uint32_t name = ppu_cyc()
++#define PPU_PHASE_ADD(slot, since) (g_ppu_phase_cyc[(slot)] += ppu_cyc() - (since))
++#define PPU_PHASE_ROW_TICK() (++g_ppu_phase_cyc_rows)
++#else
++#define PPU_PHASE_STAMP(name) [[maybe_unused]] const uint32_t name = 0u
++#define PPU_PHASE_ADD(slot, since) ((void)0)
++#define PPU_PHASE_ROW_TICK() ((void)0)
++#endif
++
+ // Widescreen margin tilemap provider (Step C). When set (by the runtime-side
+ // sidecar) and the wide path samples a margin column (hardware x outside
+ // 0..239), the BG text-tilemap entry is sourced from this hook (the true
+@@ -721,6 +752,36 @@ void mark_obj_window_scanline(bool* mask,
+     }
+ }
+ 
++// Per-scanline compositor scratch. These used to be stack locals, but every
++// one of them is read and written several times per pixel while VRAM/OAM stream
++// through the same 16 KiB D-Cache, so the candidate rows were being evicted and
++// re-fetched from PSRAM between the BG, OBJ and output phases. File-scope data
++// lands in on-chip SRAM (like g_line_palette above): a few cycles per access,
++// and it never evicts a cache line. The native path is always 240 px wide,
++// which is what the window/OBJ helpers in this file already assume.
++// GBARECOMP_PPU_ONCHIP_SCRATCH (Kconfig.proj) selects this; when it is off the
++// compositor keeps the same scratch as stack locals inside the scanline call.
++struct PixelCandidate {
++    uint16_t color = 0;
++    int key = 0x7FFFFFFF;
++    uint8_t layer = 5;
++    bool target1 = false;
++    bool target2 = false;
++    bool valid = false;
++};
++
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++static PixelCandidate g_row_top[GbaPpu::kScreenWidth];
++static PixelCandidate g_row_second[GbaPpu::kScreenWidth];
++static PixelCandidate g_row_foreign[GbaPpu::kScreenWidth];
++static uint8_t g_row_control[GbaPpu::kScreenWidth];
++static uint8_t g_row_coverage[GbaPpu::kScreenWidth];
++static bool g_row_objwin[GbaPpu::kScreenWidth];
++// Scanline built in on-chip SRAM and copied out once, so the framebuffer in
++// PSRAM sees one sequential burst instead of three byte stores per pixel.
++static uint8_t g_row_rgb[GbaPpu::kScreenWidth * 3];
++#endif
++
+ template<bool Ordered, bool HardwareOnly = false>
+ void render_scanline_impl(uint8_t* rgb,
+                               uint32_t y,
+@@ -732,6 +793,7 @@ void render_scanline_impl(uint8_t* rgb,
+                               uint32_t kScreenWidth,
+                               uint32_t kScreenHeight) {
+     GBA_RENDER_PHASE_BEGIN(profile, NativePrepare);
++    PPU_PHASE_STAMP(t_phase0);
+     if (y >= kScreenHeight) return;
+ 
+     uint8_t* row = rgb + y * kScreenWidth * 3;
+@@ -740,17 +802,10 @@ void render_scanline_impl(uint8_t* rgb,
+         return;
+     }
+ 
+-    struct PixelCandidate {
+-#if !defined(GBARECOMP_SCANLINE_HLE)
+-        uint8_t rgb[3] = {0, 0, 0};
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++    std::memcpy(g_line_palette, pal, sizeof(g_line_palette));
++    pal = g_line_palette;
+ #endif
+-        uint16_t color = 0;
+-        int key = 0x7FFFFFFF;
+-        uint8_t layer = 5;
+-        bool target1 = false;
+-        bool target2 = false;
+-        bool valid = false;
+-    };
+ 
+     // â”€â”€ Windows (GBATEK "LCD I/O Windows") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+     // window_control(x) returns the 6-bit per-pixel mask (BG0-3, OBJ, and bit5
+@@ -782,12 +837,18 @@ void render_scanline_impl(uint8_t* rgb,
+     };
+     const bool win0_row = win0_en && win_v_row(0x44);
+     const bool win1_row = win1_en && win_v_row(0x46);
+-    bool obj_window_storage[GbaPpu::kScreenWidth] = {};
+     bool* obj_window_mask = nullptr;
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++    bool* const objwin_row = g_row_objwin;
++#else
++    bool objwin_row_local[GbaPpu::kScreenWidth];
++    bool* const objwin_row = objwin_row_local;
++#endif
+     if (objwin_en) {
+-        mark_obj_window_scanline(obj_window_storage, y, dispcnt, vram, oam,
++        std::memset(objwin_row, 0, kScreenWidth * sizeof(bool));
++        mark_obj_window_scanline(objwin_row, y, dispcnt, vram, oam,
+                                  kScreenWidth, kScreenHeight);
+-        obj_window_mask = obj_window_storage;
++        obj_window_mask = objwin_row;
+     }
+     auto window_control = [&](uint32_t x) -> uint16_t {
+         if (!any_window) return 0x3Fu;
+@@ -797,36 +858,44 @@ void render_scanline_impl(uint8_t* rgb,
+             return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
+         return static_cast<uint16_t>(winout & 0x3Fu);
+     };
++    // Resolve the window mask once per row instead of once per sampled
++    // candidate: window_control() only depends on x (plus line-invariant
++    // registers and this row's OBJ-window mask), and it is consulted for every
++    // layer, every OBJ pixel and every blend decision.
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++    uint8_t* const row_control = g_row_control;
++#else
++    uint8_t row_control_local[GbaPpu::kScreenWidth];
++    uint8_t* const row_control = row_control_local;
++#endif
+ #if defined(GBARECOMP_SCANLINE_HLE)
+-    // The caller gives an immutable row snapshot. Resolve windows once, not
+-    // once per candidate/layer. No cross-row state or VRAM cache is retained.
+-    uint8_t row_control[GbaPpu::kScreenWidth];
+     for (uint32_t x = 0; x < kScreenWidth; ++x)
+         row_control[x] = static_cast<uint8_t>(window_control(x));
++#else
++    if (any_window) {
++        for (uint32_t x = 0; x < kScreenWidth; ++x)
++            row_control[x] = static_cast<uint8_t>(window_control(x));
++    }
+ #endif
+     // 0: no opaque candidate; 1: top needs the immediately following layer;
+     // 2: final output is known. Jobs are globally ordered before sampling, so
+     // completed pixels need no further tile, palette or candidate work.
+-    uint8_t coverage[GbaPpu::kScreenWidth] = {};
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++    uint8_t* const coverage = g_row_coverage;
++#else
++    uint8_t coverage_local[GbaPpu::kScreenWidth];
++    uint8_t* const coverage = coverage_local;
++#endif
++    std::memset(coverage, 0, kScreenWidth * sizeof(uint8_t));
+     uint32_t unresolved = kScreenWidth;
+     auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
+         if constexpr (Ordered) if (coverage[x] == 2) return false;
+-        return (
+-#if defined(GBARECOMP_SCANLINE_HLE)
+-                row_control[x]
+-#else
+-                window_control(x)
+-#endif
+-                & (1u << layer_bit)) != 0;
++        if (!any_window) return true;   // every bit set
++        return (row_control[x] & (1u << layer_bit)) != 0;
+     };
+     auto blend_enabled = [&](uint32_t x) -> bool {
+-        return (
+-#if defined(GBARECOMP_SCANLINE_HLE)
+-                row_control[x]
+-#else
+-                window_control(x)
+-#endif
+-                & (1u << 5)) != 0;
++        if (!any_window) return true;   // every bit set
++        return (row_control[x] & (1u << 5)) != 0;
+     };
+ 
+     uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
+@@ -835,26 +904,34 @@ void render_scanline_impl(uint8_t* rgb,
+     uint32_t second_targets = (bldcnt >> 8) & 0x3Fu;
+     uint32_t effect = (bldcnt >> 6) & 0x3u;
+ 
+-    PixelCandidate top[GbaPpu::kScreenWidth];
+-    PixelCandidate second[GbaPpu::kScreenWidth];
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++    PixelCandidate* const top = g_row_top;
++    PixelCandidate* const second = g_row_second;
++#else
++    PixelCandidate top_local[GbaPpu::kScreenWidth];
++    PixelCandidate second_local[GbaPpu::kScreenWidth];
++    PixelCandidate* const top = top_local;
++    PixelCandidate* const second = second_local;
++#endif
+     // This is deliberately a per-layer candidate, not a copy of `top`: a
+     // room BG with higher priority may cover the HUD's BG0 cells. Capturing
+     // only the explicitly declared source map cells keeps that room terrain
+     // out of the foreign frame.
+-    PixelCandidate foreign_hud_bg[GbaPpu::kScreenWidth] = {};
++    // Only the foreign-presentation path reads it, so skip the 240-entry clear
++    // (3.8 KB of stores per scanline) when no foreign background is published.
++    const uint16_t* foreign_bg = foreign_presentation_internal::background();
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++    PixelCandidate* const foreign_hud_bg = g_row_foreign;
++#else
++    PixelCandidate foreign_hud_local[GbaPpu::kScreenWidth];
++    PixelCandidate* const foreign_hud_bg = foreign_hud_local;
++#endif
++    if (foreign_bg != nullptr)
++        std::memset(foreign_hud_bg, 0, kScreenWidth * sizeof(PixelCandidate));
+     const GbaForeignObjFocusTransform* foreign_focus = (Ordered || HardwareOnly) ? nullptr :
+         foreign_presentation_internal::obj_focus();
+     const uint16_t backdrop_color = load_u16_le(&pal[0]);
+-#if !defined(GBARECOMP_SCANLINE_HLE)
+-    uint8_t backdrop_rgb[3];
+-    to_rgb888(backdrop_color, backdrop_rgb);
+-#endif
+     for (uint32_t x = 0; x < kScreenWidth; ++x) {
+-#if !defined(GBARECOMP_SCANLINE_HLE)
+-        top[x].rgb[0] = backdrop_rgb[0];
+-        top[x].rgb[1] = backdrop_rgb[1];
+-        top[x].rgb[2] = backdrop_rgb[2];
+-#endif
+         top[x].color = backdrop_color;
+         top[x].key = 0x70000000;
+         top[x].layer = 5;
+@@ -870,9 +947,6 @@ void render_scanline_impl(uint8_t* rgb,
+                       bool target2) {
+         PixelCandidate cand;
+         cand.color = color;
+-#if !defined(GBARECOMP_SCANLINE_HLE)
+-        to_rgb888(color, cand.rgb);
+-#endif
+         cand.key = key;
+         cand.layer = layer;
+         cand.target1 = target1;
+@@ -975,63 +1049,94 @@ void render_scanline_impl(uint8_t* rgb,
+             x += count;
+         }
+ #else
+-        for (uint32_t x = 0; x < kScreenWidth; ++x) {
+-            if (!layer_enabled(x, layer)) continue;
+-            uint32_t tex_x = (x + hofs) & (width_px - 1u);
+-            uint32_t tex_y = (y + vofs) & (height_px - 1u);
+-            uint32_t tile_x = tex_x >> 3;
+-            uint32_t tile_y = tex_y >> 3;
+-            uint32_t block = (tile_x >> 5) + (tile_y >> 5) * block_cols;
+-            uint32_t map_off = screen_base + block * 0x800u +
+-                ((tile_y & 31u) * 32u + (tile_x & 31u)) * 2u;
+-            if (map_off + 1 >= 96u * 1024u) continue;
++        // Batched over 8-pixel tile runs. The per-pixel form below fetched the
++        // same BG-map entry once per pixel; on this target each of those is a
++        // PSRAM round trip, which made the map/tile fetches the dominant cost
++        // of a frame. One entry per run plus one tile byte per pixel pair in
++        // 4bpp keeps the per-pixel decisions unchanged.
++        const uint32_t line_tex_y = (y + vofs) & (height_px - 1u);
++        const uint32_t line_tile_y = line_tex_y >> 3;
++        const uint32_t map_row = screen_base +
++            (line_tile_y >> 5) * block_cols * 0x800u + (line_tile_y & 31u) * 64u;
++        const uint32_t line_py = line_tex_y & 7u;
++        const int layer_key = static_cast<int>(bg_priority * 256u + 128u + layer);
++        const bool layer_target1 = (first_targets & (1u << layer)) != 0;
++        const bool layer_target2 = (second_targets & (1u << layer)) != 0;
++        // With no window enabled every pixel of the row passes the window mask,
++        // so the per-pixel layer_enabled()/blend_enabled() calls collapse to
++        // constants; hoist that decision out of the pixel loop.
++        const bool no_window = !any_window;
++        const bool want_hud = !Ordered && !HardwareOnly && foreign_focus != nullptr &&
++            foreign_bg != nullptr;
++
++        for (uint32_t x = 0; x < kScreenWidth; ) {
++            const uint32_t tex_x = (x + hofs) & (width_px - 1u);
++            const uint32_t tile_x = tex_x >> 3;
++            const uint32_t begin = tex_x & 7u;
++#if defined(GBARECOMP_PPU_BG_RUN_BATCH)
++            const uint32_t count = std::min(8u - begin, kScreenWidth - x);
++#else
++            const uint32_t count = 1u;   // per-pixel form
++#endif
++            const uint32_t map_off = map_row + (tile_x >> 5) * 0x800u +
++                (tile_x & 31u) * 2u;
++            if (map_off + 1u >= 96u * 1024u) {
++                x += count;
++                continue;
++            }
+ 
+-            uint16_t entry = load_u16_le(&vram[map_off]);
+-            uint32_t tile_num = entry & 0x03FFu;
+-            bool hflip = (entry & 0x0400u) != 0;
+-            bool vflip = (entry & 0x0800u) != 0;
+-            uint32_t palette_bank = (entry >> 12) & 0x0Fu;
+-            uint32_t px = tex_x & 7u;
+-            uint32_t py = tex_y & 7u;
+-            if (hflip) px = 7u - px;
+-            if (vflip) py = 7u - py;
++            const uint16_t entry = load_u16_le(&vram[map_off]);
++            const uint32_t tile_num = entry & 0x03FFu;
++            const bool hflip = (entry & 0x0400u) != 0;
++            const bool vflip = (entry & 0x0800u) != 0;
++            const uint32_t palette_bank = (entry >> 12) & 0x0Fu;
++            const uint32_t py = vflip ? 7u - line_py : line_py;
++            const uint32_t tile_row = char_base +
++                tile_num * (color256 ? 64u : 32u) + py * (color256 ? 8u : 4u);
++
++            // 4bpp pixels share one tile byte in pairs; reuse the last fetch so
++            // a run costs four tile-data reads instead of eight.
++            uint32_t cached_addr = 0xFFFFFFFFu;
++            uint8_t cached_byte = 0u;
+ 
+-            uint8_t pal_idx = 0;
+-            if (color256) {
+-                uint32_t tile_addr = char_base + tile_num * 64u + py * 8u + px;
+-                if (tile_addr >= 96u * 1024u) continue;
+-                pal_idx = vram[tile_addr];
+-            } else {
+-                uint32_t tile_addr = char_base + tile_num * 32u +
+-                    py * 4u + (px >> 1);
+-                if (tile_addr >= 96u * 1024u) continue;
+-                uint8_t packed = vram[tile_addr];
+-                pal_idx = (px & 1u) ? (packed >> 4) : (packed & 0x0Fu);
+-                pal_idx = static_cast<uint8_t>(
+-                    pal_idx | static_cast<uint8_t>(palette_bank << 4));
+-            }
+-            if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
++            for (uint32_t j = 0; j < count; ++j) {
++                const uint32_t sx = x + j;
++                if ((!no_window || Ordered) && !layer_enabled(sx, layer)) continue;
++                const uint32_t px = hflip ? 7u - (begin + j) : (begin + j);
+ 
+-            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+-            if (!Ordered && !HardwareOnly && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+-                                            tile_y, x, y)) {
+-                PixelCandidate& hud = foreign_hud_bg[x];
+-                hud.color = color;
+-#if !defined(GBARECOMP_SCANLINE_HLE)
+-                to_rgb888(color, hud.rgb);
+-#endif
+-                hud.key = static_cast<int>(bg_priority * 256u + 128u + layer);
+-                hud.layer = static_cast<uint8_t>(layer);
+-                hud.target1 = blend_enabled(x) &&
+-                    ((first_targets & (1u << layer)) != 0);
+-                hud.target2 = (second_targets & (1u << layer)) != 0;
+-                hud.valid = true;
++                uint8_t pal_idx;
++                if (color256) {
++                    const uint32_t tile_addr = tile_row + px;
++                    if (tile_addr >= 96u * 1024u) continue;
++                    pal_idx = vram[tile_addr];
++                } else {
++                    const uint32_t tile_addr = tile_row + (px >> 1);
++                    if (tile_addr >= 96u * 1024u) continue;
++                    if (tile_addr != cached_addr) {
++                        cached_addr = tile_addr;
++                        cached_byte = vram[tile_addr];
++                    }
++                    pal_idx = (px & 1u) ? (cached_byte >> 4) : (cached_byte & 0x0Fu);
++                    pal_idx = static_cast<uint8_t>(
++                        pal_idx | static_cast<uint8_t>(palette_bank << 4));
++                }
++                if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
++
++                const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
++                if (want_hud && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
++                                                line_tile_y, sx, y)) {
++                    PixelCandidate& hud = foreign_hud_bg[sx];
++                    hud.color = color;
++                    hud.key = layer_key;
++                    hud.layer = static_cast<uint8_t>(layer);
++                    hud.target1 = (no_window || blend_enabled(sx)) && layer_target1;
++                    hud.target2 = layer_target2;
++                    hud.valid = true;
++                }
++                submit(sx, color, layer_key, static_cast<uint8_t>(layer),
++                       (no_window || blend_enabled(sx)) && layer_target1, layer_target2);
+             }
+-            submit(x, color,
+-                   static_cast<int>(bg_priority * 256u + 128u + layer),
+-                   static_cast<uint8_t>(layer),
+-                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+-                   (second_targets & (1u << layer)) != 0);
++            x += count;
+         }
+ #endif
+     };
+@@ -1156,6 +1261,8 @@ void render_scanline_impl(uint8_t* rgb,
+     };
+ 
+     GBA_RENDER_PHASE_MARK(profile, NativeBackground);
++    PPU_PHASE_ADD(0, t_phase0);
++    PPU_PHASE_STAMP(t_phase1);
+     if constexpr (!Ordered) {
+         if (bg_mode == 0) {
+             render_regular_bg(3, 0x0E, 0x1C);
+@@ -1176,6 +1283,8 @@ void render_scanline_impl(uint8_t* rgb,
+ 
+     }
+     GBA_RENDER_PHASE_MARK(profile, NativeForeign);
++    PPU_PHASE_ADD(1, t_phase1);
++    PPU_PHASE_STAMP(t_phase2);
+     // A bounded host-owned overlay is intentionally a native-world-only
+     // presentation layer. It is composed after every guest BG candidate has
+     // resolved but before the normal guest OBJ pass, so Link/HUD objects remain
+@@ -1211,9 +1320,6 @@ void render_scanline_impl(uint8_t* rgb,
+                         cand.color = blend_alpha_gba555(overlay->pixels[source],
+                                                          old_top.color, alpha,
+                                                          16u - alpha);
+-    #if !defined(GBARECOMP_SCANLINE_HLE)
+-                        to_rgb888(cand.color, cand.rgb);
+-    #endif
+                         // Same synthetic BG2 identity as a full foreign frame;
+                         // regular guest OBJ keys are always in front of 0x10000.
+                         cand.key = 0x10000;
+@@ -1239,7 +1345,7 @@ void render_scanline_impl(uint8_t* rgb,
+         // to native BG/window state: keeping a room-authored window mask here
+         // leaked screen-fixed house/door tiles over later foreign rooms. Guest
+         // OBJ composition (including the focused Link OBJ) still happens below.
+-        if (const uint16_t* foreign = foreign_presentation_internal::background()) {
++        if (const uint16_t* foreign = foreign_bg) {
+             for (uint32_t x = 0; x < kScreenWidth; ++x) {
+                 if (foreign_hud_bg[x].valid) {
+                     top[x] = foreign_hud_bg[x];
+@@ -1248,9 +1354,6 @@ void render_scanline_impl(uint8_t* rgb,
+                 }
+                 PixelCandidate cand;
+                 cand.color = foreign[y * GbaPpu::kScreenWidth + x];
+-    #if !defined(GBARECOMP_SCANLINE_HLE)
+-                to_rgb888(cand.color, cand.rgb);
+-    #endif
+                 cand.key = 0x10000;
+                 cand.layer = 2;
+                 cand.target1 = blend_enabled(x) &&
+@@ -1264,6 +1367,8 @@ void render_scanline_impl(uint8_t* rgb,
+ 
+     }
+     GBA_RENDER_PHASE_MARK(profile, NativeObjects);
++    PPU_PHASE_ADD(2, t_phase2);
++    PPU_PHASE_STAMP(t_phase3);
+     constexpr uint32_t obj_tile_base = 0x10000u;
+     const bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
+     const uint8_t* obj_pal = pal + 0x200;
+@@ -1453,11 +1558,17 @@ void render_scanline_impl(uint8_t* rgb,
+     }
+ 
+     GBA_RENDER_PHASE_MARK(profile, NativeOutput);
++    PPU_PHASE_ADD(3, t_phase3);
++    PPU_PHASE_STAMP(t_phase4);
+     // BLDY brightness coefficient (clamped to 16/16 = full).
+     uint32_t bldy = static_cast<uint32_t>(io[0x54] | (io[0x55] << 8)) & 0x1Fu;
+     if (bldy > 16u) bldy = 16u;
+     for (uint32_t x = 0; x < kScreenWidth; ++x) {
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++        uint8_t* dst = g_row_rgb + x * 3;
++#else
+         uint8_t* dst = row + x * 3;
++#endif
+         // Alpha blend top (1st target) with the layer below (2nd target). Per
+         // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
+         // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
+@@ -1479,15 +1590,14 @@ void render_scanline_impl(uint8_t* rgb,
+                 : darken_gba555(top[x].color, bldy);
+             to_rgb888(adjusted, dst);
+         } else {
+-#if defined(GBARECOMP_SCANLINE_HLE)
+             to_rgb888(top[x].color, dst);
+-#else
+-            dst[0] = top[x].rgb[0];
+-            dst[1] = top[x].rgb[1];
+-            dst[2] = top[x].rgb[2];
+-#endif
+         }
+     }
++#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
++    std::memcpy(row, g_row_rgb, kScreenWidth * 3);
++#endif
++    PPU_PHASE_ADD(4, t_phase4);
++    PPU_PHASE_ROW_TICK();
+     return;
+ }
+ 
+diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.h b/third_party/gbarecomp-main/src/gba/gba_ppu.h
+index 69c2465..6e853f4 100644
+--- a/third_party/gbarecomp-main/src/gba/gba_ppu.h
++++ b/third_party/gbarecomp-main/src/gba/gba_ppu.h
+@@ -159,8 +159,14 @@ public:
+     static constexpr uint32_t kMaxExtraY = 352;
+     static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 1280
+     static constexpr uint32_t kMaxRenderHeight = kScreenHeight + 2u * kMaxExtraY;  // 864
++#ifdef GBARECOMP_COMPACT_FRAMEBUFFER
++    // Embedded targets: no view expansion, framebuffers sized for native only
++    // and stored inline (no heap). See GBARECOMP_COMPACT_FRAMEBUFFER.
++    static constexpr std::size_t kMaxFramebufferBytes = kFramebufferBytes;   // 115200
++#else
+     static constexpr std::size_t kMaxFramebufferBytes =
+         static_cast<std::size_t>(kMaxRenderWidth) * kMaxRenderHeight * 3;
++#endif
+ 
+     // Set the per-side view margins (clamped to the compile-time max per axis).
+     // Call once at runtime init from the runner's --widescreen wiring.
+@@ -252,8 +258,13 @@ private:
+     // directly produced a horizontal one-frame-stale tear band at whatever
+     // scanline the guest happened to have rendered to (the Minish Cap
+     // walk-scroll "warble").
++#ifdef GBARECOMP_COMPACT_FRAMEBUFFER
++    std::array<uint8_t, kMaxFramebufferBytes> work_fb_{};
++    std::array<uint8_t, kMaxFramebufferBytes> latched_fb_{};
++#else
+     std::vector<uint8_t> work_fb_ = std::vector<uint8_t>(kMaxFramebufferBytes);
+     std::vector<uint8_t> latched_fb_ = std::vector<uint8_t>(kMaxFramebufferBytes);
++#endif
+     bool has_latched_fb_ = false;
+ 
+     struct AffineLineState {
+diff --git a/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp b/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
+index fa45091..f91ba82 100644
+--- a/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
++++ b/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
+@@ -30,7 +30,9 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <functional>
++#ifndef GBARECOMP_NO_HOST_SAMPLER
+ #include <thread>
++#endif
+ #include <type_traits>
+ #include <unordered_map>
+ #include <utility>
+@@ -46,6 +48,38 @@
+ extern "C" uint32_t g_runtime_break_pc = 0;
+ extern "C" unsigned g_runtime_native_region_context = 1;
+ 
++// ── Temporary device-phase DWT buckets (frame-rate investigation) ───────────
++// Host-cycle split of the device-pump path. Printed by the `[gba] perf2` line
++// in src/gba_device.cpp, which resets them every 60 frames. Delete this block
++// and that print line together once the frame-rate question is answered.
++//   0 audio, 1 timers, 2 SIO, 3 PPU tick, 4 scanline render,
++//   5 HBlank DMA, 6 VBlank latch, 7 event-distance queries
++// GBARECOMP_PERF_PROBES (Kconfig.proj) compiles the whole split out.
++#if defined(GBARECOMP_PERF_PROBES)
++extern "C" {
++unsigned g_dev_prof_cyc[8] = {};
++unsigned g_dev_prof_renders = 0;
++unsigned g_dev_prof_loops = 0;
++}
++static inline unsigned dev_prof_now(void)
++{
++    return *(volatile unsigned *)0xE0001004u;          // DWT->CYCCNT
++}
++#define DEV_PROF_STAMP(name) unsigned name = dev_prof_now()
++#define DEV_PROF_ADD(slot, since) (g_dev_prof_cyc[(slot)] += dev_prof_now() - (since))
++#define DEV_PROF_RENDER() (++g_dev_prof_renders)
++#define DEV_PROF_LOOP()   (++g_dev_prof_loops)
++#else
++static inline unsigned dev_prof_now(void)
++{
++    return 0u;
++}
++#define DEV_PROF_STAMP(name) [[maybe_unused]] unsigned name = 0u
++#define DEV_PROF_ADD(slot, since) ((void)0)
++#define DEV_PROF_RENDER() ((void)0)
++#define DEV_PROF_LOOP()   ((void)0)
++#endif
++
+ // Count of PPU VBlank-start events (scanline 159->160), incremented
+ // unconditionally in runtime_tick regardless of DISPSTAT IRQ-enable.
+ // The debug step-one-frame primitive (runtime.cpp step_frame) stops when
+@@ -194,7 +228,9 @@ static gba::GbaPpu* g_active_ppu = nullptr;
+ // the top hot PCs are printed to stderr at process exit. This is what
+ // localized the MC-HP-002 transition freeze to the M4A sound-engine
+ // sequence walker (0x08004286) when reasoning + per-call timing failed.
++#ifndef GBARECOMP_NO_HOST_SAMPLER
+ static std::thread       g_sampler;
++#endif
+ static std::atomic<bool> g_sampling{false};
+ static std::unordered_map<uint32_t, uint64_t> g_pc_hist;  // sampler-thread only
+ 
+@@ -248,6 +284,7 @@ static long long sampler_live_seconds() {
+ }
+ 
+ static void sampler_loop() {
++#ifndef GBARECOMP_NO_HOST_SAMPLER
+     const long long live_secs = sampler_live_seconds();
+     auto next_dump = std::chrono::steady_clock::now() +
+         std::chrono::seconds(live_secs > 0 ? live_secs : 86400);
+@@ -260,9 +297,11 @@ static void sampler_loop() {
+         }
+         std::this_thread::sleep_for(std::chrono::microseconds(250));
+     }
++#endif
+ }
+ 
+ static void start_sampler() {
++#ifndef GBARECOMP_NO_HOST_SAMPLER
+     // Binding an instance is a hot path. Read this launch-time diagnostic
+     // option once: Windows getenv scans/locks the environment on every call.
+     static const bool enabled = std::getenv("GBARECOMP_SAMPLE") != nullptr;
+@@ -274,6 +313,7 @@ static void start_sampler() {
+         if (g_sampler.joinable()) g_sampler.join();
+         dump_sample_hist("exit");
+     });
++#endif
+ }
+ 
+ bool should_trace_unmapped_read(uint32_t addr) {
+@@ -398,6 +438,7 @@ static void dump_hang_state(const char* reason) {
+     // on (e.g. whoever wrote the bad pointer being walked). Dumping it makes the
+     // writer of a wrong value attributable from the freeze alone — trace-the-
+     // writer without a second run (PRINCIPLES.md "find the first divergence").
++#ifndef GBARECOMP_NO_HANG_TRACE_DUMP
+     {
+         static RuntimeTraceEntry tr[4096];
+         uint32_t ntr = runtime_trace_copy_recent(tr, 4096);
+@@ -420,6 +461,7 @@ static void dump_hang_state(const char* reason) {
+                 "here).\n", ntr);
+         }
+     }
++#endif  // GBARECOMP_NO_HANG_TRACE_DUMP
+ }
+ 
+ }  // namespace gbarecomp
+@@ -614,6 +656,7 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+     uint32_t remaining = cycles;
+     while (remaining != 0) {
+         uint32_t chunk = remaining;
++        DEV_PROF_STAMP(_dp_t);
+         uint32_t until_sample = bus->audio().cycles_until_next_shared_event();
+         uint32_t until_timer = bus->io().cycles_until_next_timer_event();
+         uint32_t until_sio = bus->io().cycles_until_next_sio_event();
+@@ -623,19 +666,30 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+         if (until_sio < chunk) chunk = until_sio;
+         if (until_ppu < chunk) chunk = until_ppu;
+         if (chunk == 0) chunk = 1;
++        DEV_PROF_ADD(7, _dp_t);
++        DEV_PROF_LOOP();
+ 
++        _dp_t = dev_prof_now();
+         GBA_DEVICE_PHASE(0,bus->audio().tick(chunk));
++        DEV_PROF_ADD(0, _dp_t);
++        _dp_t = dev_prof_now();
+         GBA_DEVICE_PHASE(1,bus->io().tick_timers(chunk));
++        DEV_PROF_ADD(1, _dp_t);
++        _dp_t = dev_prof_now();
+         GBA_DEVICE_PHASE(2,bus->io().tick_sio(chunk));
++        DEV_PROF_ADD(2, _dp_t);
+ 
++        _dp_t = dev_prof_now();
+         uint16_t vc_compare = static_cast<uint16_t>(
+             (bus->io().dispstat() >> 8) & 0xFFu);
+         auto events = GBA_DEVICE_PHASE(3,ppu->tick(chunk, vc_compare));
++        DEV_PROF_ADD(3, _dp_t);
+         uint16_t ds = bus->io().dispstat();
+         if (events.hblank_started &&
+             ppu->vcount() < gba::GbaPpu::kLinesVisible) {
+             std::chrono::steady_clock::time_point _prof_t0;
+             if (g_phase_prof) _prof_t0 = std::chrono::steady_clock::now();
++            const unsigned _dp_r = dev_prof_now();
+             ppu->render_scanline(ppu->vcount(),
+                                  bus->io().read16(0x000),
+                                  bus->io().raw(),
+@@ -646,6 +700,8 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+                                  , bus->draw_memory_supported() ? bus->draw_memory() : nullptr
+ #endif
+                                  );
++            DEV_PROF_ADD(4, _dp_r);
++            DEV_PROF_RENDER();
+             if (g_phase_prof) {
+                 g_prof_scanline_ns += static_cast<unsigned long long>(
+                     std::chrono::duration_cast<std::chrono::nanoseconds>(
+@@ -658,13 +714,17 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+             // the DMA at HBlank N loads the register used by line N+1). This is
+             // what walks the per-scanline WIN0H circle table for the transition
+             // iris (MC-HP-003).
++            _dp_t = dev_prof_now();
+             GBA_DEVICE_PHASE(4,bus->io().run_timed_dma(2));
++            DEV_PROF_ADD(5, _dp_t);
+         }
+         if (events.vblank_started) {
++            _dp_t = dev_prof_now();
+             GBA_DEVICE_PHASE(5,ppu->mark_framebuffer_latched());
+             ++g_runtime_vblank_starts;
+             GBA_DEVICE_PHASE(5,bus->io().run_timed_dma(1));   // VBlank-timed DMA
+             if (!g_session_execution && g_vblank_input_hook) g_vblank_input_hook();
++            DEV_PROF_ADD(6, _dp_t);
+         }
+         if (!g_session_execution && events.frame_completed && g_frame_start_hook) {
+             g_frame_start_hook();
