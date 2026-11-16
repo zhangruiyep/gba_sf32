@@ -56,15 +56,16 @@ config GBARECOMP_SMALL_AUDIO_CAPTURE
 
 config GBARECOMP_ONCHIP_DISPLAY_MEM
     bool "Keep VRAM/OAM/palette in on-chip SRAM"
-    default y
+    default n
     help
       Bind GbaBus's 96 KB VRAM, 1 KB OAM and 1 KB palette to on-chip SRAM
       instead of the PSRAM arena that holds the rest of the bus. The PPU
       samples them several times per pixel, and each PSRAM load costs a
       round trip plus a D-Cache line evicted by the next access.
-      Requires the GBARECOMP_ONCHIP_DISPLAY_MEM branch in gba_bus.h and
-      GBARECOMP_PPU_ONCHIP_SCRATCH in gba_ppu.cpp for the per-line palette
-      snapshot to pay off.
+      Off by default: measured 5.97 fps against 6.04 fps without it, i.e.
+      no gain, because the scanline compositor is compute-bound rather
+      than VRAM-bandwidth-bound (344 cycles/pixel versus 14 cycles for an
+      on-chip read). It also costs 100 KB of the 178 KB on-chip heap.
 
 config GBARECOMP_PPU_ONCHIP_SCRATCH
     bool "Keep scanline compositor scratch in on-chip SRAM"
