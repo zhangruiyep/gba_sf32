@@ -54,4 +54,45 @@ config GBARECOMP_SMALL_AUDIO_CAPTURE
       Enable this when GBARECOMP_PSRAM_ALLOC is off, otherwise the
       capture ring cannot fit in the on-chip heap.
 
+config GBARECOMP_ONCHIP_DISPLAY_MEM
+    bool "Keep VRAM/OAM/palette in on-chip SRAM"
+    default y
+    help
+      Bind GbaBus's 96 KB VRAM, 1 KB OAM and 1 KB palette to on-chip SRAM
+      instead of the PSRAM arena that holds the rest of the bus. The PPU
+      samples them several times per pixel, and each PSRAM load costs a
+      round trip plus a D-Cache line evicted by the next access.
+      Requires the GBARECOMP_ONCHIP_DISPLAY_MEM branch in gba_bus.h and
+      GBARECOMP_PPU_ONCHIP_SCRATCH in gba_ppu.cpp for the per-line palette
+      snapshot to pay off.
+
+config GBARECOMP_PPU_ONCHIP_SCRATCH
+    bool "Keep scanline compositor scratch in on-chip SRAM"
+    default y
+    help
+      Move the per-scanline candidate rows, window/coverage masks and the
+      RGB888 row buffer out of the scanline compositor's stack into
+      file-scope data (on-chip SRAM), and copy the palette once per line.
+      They are re-read several times per pixel while VRAM/OAM stream
+      through the same 16 KiB D-Cache, so stack copies were being evicted
+      and refetched from PSRAM.
+
+config GBARECOMP_PPU_BG_RUN_BATCH
+    bool "Batch BG text sampling over 8-pixel tile runs"
+    default y
+    help
+      Fetch a text BG's map entry and tile byte once per 8-pixel tile run
+      instead of once per pixel. Disabling restores the per-pixel form,
+      where every pixel repeats the same map fetch.
+
+config GBARECOMP_PERF_PROBES
+    bool "Enable the DWT frame-time probes"
+    default y
+    help
+      The temporary [gba] perf/perf2/perf3/lcd/mem-bench instrumentation
+      used to locate the frame-rate bottleneck: DWT cycle buckets in
+      gba_device.cpp, main.c and runtime_bus_bridge.cpp, plus the
+      render-phase split in gba_ppu.cpp. Turn this off to build without
+      the probes.
+
 endmenu

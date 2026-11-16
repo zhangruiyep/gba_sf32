@@ -11,7 +11,7 @@
 | Phase 2-A | 仓库根独立 scons 工程骨架 | ✅ 编译通过（`main.bin` 325,240 B） |
 | Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（当时的「滚动彩条」实为 165×15 坐标 bug，已在 2-C 修复） |
 | Phase 2-C | runtime 移植到 SiFli HAL | ✅ 完成并真机验证（BIOS 从 reset vector 跑到空闲态，236 个函数入口，无 fault；修复送屏几何后居中 240×160 白块，2026-11-11 复烧确认） |
-| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.3 |
+| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.3。性能测量进行中（≈4.6 fps / 8% 实时），见 §0.4 |
 | Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 模板表去重） | 📋 候选已归档（见 §3.2.4）。2-D 未超限（ROM 余 371,910 B），非阻塞；Tier3 已使补种子路线不再必要，是否实施待定 |
 | Phase 3 | 音频 / 按键 / 存档 | ⏳ 未开始 |
 
@@ -103,6 +103,61 @@ shard 8 → 16、代码 +≈2.6 MB，LINK 直接 `region 'ROM' overflowed by 247
   `bus bind` 计时与每 60 帧 `frame` 心跳。
 - **结论**：Phase 2-D 关闭。不再补种子、不改 codegen；下一步候选由用户定：Phase 3（音频/按键/存档）
   或先做性能（当前 ≈5 fps，目标实时）。
+
+### 0.4 性能测量（2026-11-13，进行中）
+
+**14:05:59 日志的帧率结论**（`窗口1_COM14_(2026-11-13-14-05-59)_ui.log`）：`frame 60`（14:06:16.703）→
+`frame 960`（14:09:31.771）＝ 900 帧 / 195.1 s ≈ **4.6 fps**；`vblank 60→981` ≈ 4.72 Hz ≈ **8% 实时**。
+帧速率随场景变复杂从 ~5.0 fps（240→360 段）缓降到 ~3.9 fps（840→960 段）。
+GBA 帧预算 280,896 guest 周期 ≈ 16.74 ms，实测 ≈217 ms/帧 ⇒ 240 MHz 下 ≈**185 主机时钟 / guest 周期**。
+已排除：Tier3 不在热路径（miss 停在 51）；读卡只占开机 `bus bind` 924 ms。
+
+**耗时归属假设**（待探针数据裁决，按证据强度）：
+
+1. `dispatch_resolve` 每次块间跳转对 167,911 项派发表（≈2.5 MB，NOR XIP）二分 ≈18 次随机读，基本全 cache miss；
+   前面还有 `lookup_native_ram`（256 项 hash cache）、trace / force-interp 检查。
+2. 12.68 MB `.text` + 2.5 MB 派发表全部 XIP，依赖 cache。
+3. codegen 无寄存器分配：每条 guest 指令都是 `g_cpu.R[]` 内存读写（Phase 2-E 的 E1）。
+4. PPU 全软件渲染 + 每帧 38,400 px RGB888→RGB565 + 76.8 KB LCD 同步 flush，与 guest 串行、不重叠。
+5. 单线程串行；`pc` 常在 BIOS `00000348`（HALT/IntrWait 续跑点），HALT 泵粒度也可能参与。
+
+**已加的临时探针**（未提交，全部带 `Temporary` 注释，随时可删）：
+
+- `src/gba_device.cpp`：DWT `CYCCNT`（`0xE0001004`，`perf_start()` 在 `reset_cpu()` 后使能 TRCENA/CYCCNTENA）
+  累计三桶，每 60 帧打印
+  `[gba] perf 60f: wall N ms (X cyc) | disp N ms N calls | halt N ms N pumps | pres N ms N`。
+  `wall` 同时给 ms 与 DWT 周期，用于核对 240 MHz 假设（应 ≈240,000 cyc/ms）。
+- `src/main.c`：`gba_lcd_present()` 内拆分转换与推送，每 60 帧打印
+  `[gba] lcd 60f: convert N ms, flush N ms`。
+- 编译结果：`main.bin` 16,352,908 B（+640 B），ROM 余 371,130 B，仅既有 `g_force_interp` / RWX 告警。
+
+**判读口径**：
+
+| 现象 | 结论 | 下一步 |
+|------|------|--------|
+| `disp ms / calls` 单次 ≫1 µs | 派发解析主导 | 在 `dispatch_resolve` 内部再切分（hash cache / 二分 / `lookup_native_ram`） |
+| `halt pumps` 达数万/帧且 `halt ms` 占比高 | 空闲泵 + 每扫描线 PPU 渲染主导 | 加大泵粒度、渲染批量化 |
+| `pres` 占比高 | 呈现链路主导 | 看 `lcd` 行 convert vs flush，再决定转换 SIMD 化 / 双缓冲 |
+| `wall cyc / wall ms` ≠ 24 万 | 主频假设错 | 修正 `to_ms()` 的 `kCoreHz` 后重测 |
+
+**构建命令（PowerShell）**：必须照 `set_env.bat gcc` 组装 PATH，缺 `tools\bin` 会在生成
+`link_copy.lds` 时报 `The system cannot find the file specified`：
+
+```powershell
+$env:SIFLI_SDK='E:/work/gitee/sifli/SiFli-SDK/v2.5.1'; $env:SIFLI_SDK_PATH=$env:SIFLI_SDK
+$env:RTT_CC='gcc'; $env:RTT_EXEC_PATH='D:\sifli\env\tools\gnu_gcc\arm_gcc_14.2.1\bin'
+$env:PYTHONHOME='D:\sifli\env\tools\python-3.11.9-amd64'
+$env:PYTHONPATH="D:\sifli\env\tools\python-3.11.9-amd64;E:\work\gitee\sifli\SiFli-SDK\v2.5.1\tools\build;E:\work\gitee\sifli\SiFli-SDK\v2.5.1\tools\build\default"
+$env:PATH="D:\sifli\env\tools\git\Git\bin;D:\sifli\env\tools\bin;$env:RTT_EXEC_PATH;$env:PYTHONHOME;$env:PYTHONHOME\Scripts;D:\sifli\env\tools\qemu\qemu32;D:\sifli\env\tools\cmake\bin;E:\work\gitee\sifli\SiFli-SDK\v2.5.1\tools\menuconfig\dist;E:\work\gitee\sifli\SiFli-SDK\v2.5.1\tools\scripts;" + $env:PATH
+scons --board=sf32lb52-lchspi-ulp -j8
+```
+
+坑：直接调 `scons` 可能命中 Python 2.7 的 `scons.bat`（`site.py` SyntaxError），`Scripts\scons.exe`
+全路径调会 `SRE module mismatch`；按上面的 PATH 注入后用 `scons` 即可，或 `python.exe -m SCons`。
+本次构建因根目录 `.sconsign.dblite` 已被移入回收站而触发全量重编译（**禁止访问/恢复回收站**，重建即可）。
+
+**等待中**：用户烧录后取 1–2 分钟（进赛道）日志，按上表定位后再决定改哪一层；探针数据出来前不动优化代码。
+工作区状态：`src/gba_device.cpp` / `src/main.c` 含探针、本文件含本节，三者**均未提交**（最近提交 `0c60681`）。
 
 ## 1. 硬件确认（锁定）
 

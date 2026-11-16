@@ -55,6 +55,157 @@ gba::GbaBus  *g_bus = nullptr;
 gba::GbaPpu  *g_ppu = nullptr;
 gba::GbaBios  g_bios;
 
+// Temporary performance probe (DWT cycle counter). Delete this block and the
+// [gba] perf line with it once the frame-rate question is answered. The core
+// clock is assumed to be 240 MHz; the report also prints the raw DWT cycle
+// count for the window, so a wrong assumption shows up as a mismatch against
+// the rt_tick-based wall time.
+constexpr uint32_t kCoreHz = 240000000u;
+
+// GBARECOMP_PERF_PROBES (Kconfig.proj) gates the DWT timing probes. With the
+// option off the clock is never started and every reading is 0, so the probe
+// call sites below stay in place but compile to nothing.
+inline uint32_t perf_now(void)
+{
+#if defined(GBARECOMP_PERF_PROBES)
+    return *(volatile uint32_t *)0xE0001004u;          // DWT->CYCCNT
+#else
+    return 0u;
+#endif
+}
+
+void perf_start(void)
+{
+#if defined(GBARECOMP_PERF_PROBES)
+    *(volatile uint32_t *)0xE000EDFCu |= (1u << 24);   // DEMCR.TRCENA
+    *(volatile uint32_t *)0xE0001004u = 0;
+    *(volatile uint32_t *)0xE0001000u |= 1u;           // DWT->CTRL.CYCCNTENA
+#endif
+}
+
+uint32_t g_dispatch_cycles = 0;
+uint32_t g_dispatch_calls = 0;
+uint32_t g_halt_cycles = 0;
+uint32_t g_halt_pumps = 0;
+uint32_t g_present_cycles = 0;
+uint32_t g_present_count = 0;
+uint32_t g_report_tick = 0;
+uint32_t g_report_cycle = 0;
+
+// Device-phase buckets filled by runtime_bus_bridge.cpp's tick_devices().
+// Temporary: delete together with its `[gba] perf2` print line.
+#if defined(GBARECOMP_PERF_PROBES)
+extern "C" {
+extern unsigned g_dev_prof_cyc[8];
+extern unsigned g_dev_prof_renders;
+extern unsigned g_dev_prof_loops;
+extern unsigned g_ppu_phase_cyc[5];
+}
+#endif
+
+uint32_t to_ms(uint32_t cycles)
+{
+    return (uint32_t)(((std::uint64_t)cycles * 1000u) / kCoreHz);
+}
+
+void perf_report(void)
+{
+#if defined(GBARECOMP_PERF_PROBES)
+    const uint32_t wall_ms = rt_tick_get() - g_report_tick;
+    const uint32_t wall_cyc = perf_now() - g_report_cycle;
+
+    rt_kprintf("[gba] perf 60f: wall %u ms (%u cyc) | disp %u ms %u calls | halt %u ms %u pumps | pres %u ms %u\n",
+               (unsigned int)wall_ms, (unsigned int)wall_cyc,
+               (unsigned int)to_ms(g_dispatch_cycles), (unsigned int)g_dispatch_calls,
+               (unsigned int)to_ms(g_halt_cycles), (unsigned int)g_halt_pumps,
+               (unsigned int)to_ms(g_present_cycles), (unsigned int)g_present_count);
+
+    // Device-pump split. `render` is the scanline compositor; `qry` the
+    // event-distance queries; anything left between `halt` above and their sum
+    // is runtime_tick()/tick_devices bookkeeping plus DMA steal and IRQ entry.
+    const uint32_t rend_cyc = g_dev_prof_cyc[4];
+    rt_kprintf("[gba] perf2 60f: render %u ms %u ln (%u cyc/ln) | ppu %u | audio %u | tim %u | sio %u | hdma %u | vbl %u | qry %u | loops %u\n",
+               (unsigned int)to_ms(rend_cyc), (unsigned int)g_dev_prof_renders,
+               (unsigned int)(g_dev_prof_renders != 0u
+                                  ? rend_cyc / g_dev_prof_renders : 0u),
+               (unsigned int)to_ms(g_dev_prof_cyc[3]),
+               (unsigned int)to_ms(g_dev_prof_cyc[0]),
+               (unsigned int)to_ms(g_dev_prof_cyc[1]),
+               (unsigned int)to_ms(g_dev_prof_cyc[2]),
+               (unsigned int)to_ms(g_dev_prof_cyc[5]),
+               (unsigned int)to_ms(g_dev_prof_cyc[6]),
+               (unsigned int)to_ms(g_dev_prof_cyc[7]),
+               (unsigned int)g_dev_prof_loops);
+
+    // Scanline phase split (see g_ppu_phase_cyc in gba_ppu.cpp): prep / BG /
+    // foreign / OBJ / output. Temporary like the counters above.
+    rt_kprintf("[gba] perf3 60f: prep %u | bg %u | fgn %u | obj %u | out %u ms\n",
+               (unsigned int)to_ms(g_ppu_phase_cyc[0]),
+               (unsigned int)to_ms(g_ppu_phase_cyc[1]),
+               (unsigned int)to_ms(g_ppu_phase_cyc[2]),
+               (unsigned int)to_ms(g_ppu_phase_cyc[3]),
+               (unsigned int)to_ms(g_ppu_phase_cyc[4]));
+    for (unsigned int i = 0; i < 5u; ++i)
+    {
+        g_ppu_phase_cyc[i] = 0;
+    }
+
+    g_report_tick = rt_tick_get();
+    g_report_cycle = perf_now();
+    g_dispatch_cycles = 0;
+    g_dispatch_calls = 0;
+    g_halt_cycles = 0;
+    g_halt_pumps = 0;
+    g_present_cycles = 0;
+    g_present_count = 0;
+    for (unsigned int i = 0; i < 8u; ++i)
+    {
+        g_dev_prof_cyc[i] = 0;
+    }
+    g_dev_prof_renders = 0;
+    g_dev_prof_loops = 0;
+#endif
+}
+
+// Temporary: random-read latency of on-chip SRAM vs the PSRAM arena. Every
+// index depends on the previous byte, so the loop measures full load latency
+// instead of overlapping loads. Windows are 16 KiB (SRAM) and 128 KiB (PSRAM):
+// a working data cache would drag the PSRAM figure down toward the SRAM one,
+// so this also tests whether a data cache is in effect at all.
+#if defined(GBARECOMP_PERF_PROBES)
+uint8_t g_bench_sram[16u * 1024u];
+#endif
+
+void perf_bench_memory(const void *psram)
+{
+#if defined(GBARECOMP_PERF_PROBES)
+    const uint8_t *area[2] = {g_bench_sram, (const uint8_t *)psram};
+    const uint32_t mask[2] = {(16u * 1024u) - 1u, (128u * 1024u) - 1u};
+    const char *name[2] = {"sram16K", "psram128K"};
+
+    for (unsigned int a = 0; a < 2u; ++a)
+    {
+        const uint8_t *p = area[a];
+        uint32_t idx = 1u;
+        uint32_t sink = 0u;
+        const uint32_t t0 = perf_now();
+        for (uint32_t i = 0; i < 16384u; ++i)
+        {
+            sink += p[(idx ^ (idx >> 13)) & mask[a]];
+            idx = idx * 1103515245u + sink + 12345u;
+        }
+        const uint32_t dt = perf_now() - t0;
+        rt_kprintf("[gba] mem bench %s: %u cyc/16K reads = %u.%u cyc/read (%u)\n",
+                   name[a], (unsigned int)dt,
+                   (unsigned int)(dt / 16384u),
+                   (unsigned int)(((dt % 16384u) * 10u) / 16384u),
+                   (unsigned int)sink);
+    }
+#else
+    (void)psram;
+#endif
+}
+
 // One bit per 4-byte BIOS word, so the entry count below reports distinct
 // functions instead of every call.
 uint8_t  g_bios_seen[kBiosSize / 4u / 8u];
@@ -163,14 +314,18 @@ bool present_frame(void)
     }
     g_presented_vblank = vbl;
 
+    const uint32_t present_start = perf_now();
+    gba_lcd_present(g_ppu->latched_framebuffer(),
+                    g_ppu->render_width(), g_ppu->render_height());
+    g_present_cycles += perf_now() - present_start;
+    ++g_present_count;
+
     if ((++g_frames % 60u) == 0u)
     {
         rt_kprintf("[gba] frame %u pc=%08x vblank=%u\n",
                    (unsigned int)g_frames, g_cpu.R[15], vbl);
+        perf_report();
     }
-
-    gba_lcd_present(g_ppu->latched_framebuffer(),
-                    g_ppu->render_width(), g_ppu->render_height());
     return false;
 }
 
@@ -229,10 +384,25 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     runtime_mark_present_stack_base();
     reset_cpu();
 
+    perf_start();
+    g_report_tick = rt_tick_get();
+    g_report_cycle = perf_now();
+
+    // Temporary: SRAM vs PSRAM random-read latency, using the tail of the arena
+    // (past the machine objects) as the PSRAM window.
+#if defined(GBARECOMP_PERF_PROBES)
+    if (arena_bytes >= need + 15u + (128u * 1024u))
+    {
+        perf_bench_memory(reinterpret_cast<const void *>(base + need));
+    }
+#endif
+
     rt_kprintf("[gba] BIOS loaded, booting from reset vector %08x\n", g_cpu.R[15]);
 
     for (;;)
     {
+        const uint32_t step_start = perf_now();
+
         if (g_bus->io().halted())
         {
             // HALTed CPU: there is no code to run until an IRQ arrives, and the
@@ -256,6 +426,8 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
                 chunk = 1u;
             }
             runtime_tick(chunk);
+            g_halt_cycles += perf_now() - step_start;
+            ++g_halt_pumps;
         }
         else
         {
@@ -265,6 +437,8 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
                 break;
             }
             runtime_dispatch(pc);
+            g_dispatch_cycles += perf_now() - step_start;
+            ++g_dispatch_calls;
         }
 
         // Slim codegen strips runtime_should_yield() from the cartridge, so the
