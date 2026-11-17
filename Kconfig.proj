@@ -42,9 +42,9 @@ config GBARECOMP_PSRAM_ALLOC
     bool "Place large cold buffers in PSRAM"
     default y
     help
-      Serve the 3.5 MiB audio capture ring from the 4 MiB PSRAM arena in
-      src/gba_psram.c instead of the ~320 KiB on-chip heap. Disable only
-      if the board has no external PSRAM.
+      Serve the 3.5 MiB audio capture ring and the MP2K shadow ring from the
+      4 MiB PSRAM arena in src/gba_psram.c instead of the ~320 KiB on-chip
+      heap. Disable only if the board has no external PSRAM.
 
 config GBARECOMP_SMALL_AUDIO_CAPTURE
     bool "Shrink the audio capture ring to 1024 entries"
@@ -85,6 +85,30 @@ config GBARECOMP_PPU_BG_RUN_BATCH
       Fetch a text BG's map entry and tile byte once per 8-pixel tile run
       instead of once per pixel. Disabling restores the per-pixel form,
       where every pixel repeats the same map fetch.
+
+config GBARECOMP_PPU_ROW_WINDOW_CACHE
+    bool "Resolve PPU window masks once per scanline"
+    default y
+    help
+      Precompute the 6-bit window mask for the whole row, and skip the
+      lookup entirely when no window is enabled, instead of calling
+      window_control() for every sampled layer, OBJ pixel and blend test.
+
+config GBARECOMP_PPU_DEFER_RGB
+    bool "Expand scanline colors to RGB888 once, at output"
+    default y
+    help
+      Keep the compositor's PixelCandidate rows in GBA 15-bit color and
+      convert once in the output pass, instead of caching an rgb[3] triple
+      at every submit(). Disabling restores the per-candidate conversion.
+
+config GBARECOMP_PPU_LAZY_HUD_CLEAR
+    bool "Skip the unused foreign HUD row clear"
+    default y
+    help
+      Clear and scan the per-layer foreign HUD candidate row only when a
+      foreign background is published. Disabling clears it on every
+      scanline, as upstream does.
 
 config GBARECOMP_PERF_PROBES
     bool "Enable the DWT frame-time probes"

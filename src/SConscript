@@ -56,6 +56,9 @@ else:
 #   ONCHIP_DISPLAY_MEM   bind VRAM/OAM/palette to on-chip SRAM
 #   PPU_ONCHIP_SCRATCH   scanline compositor scratch and row buffer on-chip
 #   PPU_BG_RUN_BATCH     sample text BGs once per 8-pixel tile run
+#   PPU_ROW_WINDOW_CACHE resolve PPU window masks once per scanline
+#   PPU_DEFER_RGB        expand scanline colors to RGB888 once, at output
+#   PPU_LAZY_HUD_CLEAR   skip the unused foreign HUD row clear
 #   PERF_PROBES          DWT frame-time probes (perf/perf2/perf3/lcd/mem bench)
 runtime_features = [
     'GBARECOMP_COMPACT_FRAMEBUFFER',
@@ -67,6 +70,9 @@ runtime_features = [
     'GBARECOMP_ONCHIP_DISPLAY_MEM',
     'GBARECOMP_PPU_ONCHIP_SCRATCH',
     'GBARECOMP_PPU_BG_RUN_BATCH',
+    'GBARECOMP_PPU_ROW_WINDOW_CACHE',
+    'GBARECOMP_PPU_DEFER_RGB',
+    'GBARECOMP_PPU_LAZY_HUD_CLEAR',
     'GBARECOMP_PERF_PROBES',
 ]
 
