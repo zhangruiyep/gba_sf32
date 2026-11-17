@@ -86,6 +86,27 @@ config GBARECOMP_PPU_BG_RUN_BATCH
       instead of once per pixel. Disabling restores the per-pixel form,
       where every pixel repeats the same map fetch.
 
+config GBARECOMP_PPU_BG_ZERO_RUN
+    bool "Skip fully transparent 4bpp BG tile runs"
+    default y
+    help
+      Read the four tile bytes of an 8-pixel 4bpp run with one 32-bit load.
+      When all four are zero every pixel of the run is color 0 and the
+      per-pixel loop would reject it, so the run is skipped as a whole and
+      the same word decodes the remaining runs from registers.
+
+config GBARECOMP_PPU_BG_RUN_SKIP
+    bool "Skip BG tile runs already covered by a nearer candidate"
+    default n
+    help
+      When no alpha blending is selected and no semi-transparent OBJ touches
+      the scanline, a BG tile run whose eight pixels are all already covered
+      by a nearer candidate can never reach the output. Drop such runs before
+      the map/tile fetch and the per-pixel decode. Disabling restores the
+      per-pixel key comparison and submit() call. Off by default: MARIO KART
+      draws only ~38% opaque pixels, so an eight-pixel run is fully covered
+      about 0.04% of the time and the guard never fires on hardware.
+
 config GBARECOMP_PPU_ROW_WINDOW_CACHE
     bool "Resolve PPU window masks once per scanline"
     default y

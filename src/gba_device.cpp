@@ -108,6 +108,14 @@ extern unsigned g_ppu_bg_fetch_cyc;
 extern unsigned g_ppu_bg_pix_cyc;
 extern unsigned g_ppu_bg_fast_px;
 extern unsigned g_ppu_bg_fast_subm;
+extern unsigned g_ppu_bg_pix_win;
+extern unsigned g_ppu_bg_pix_zero;
+extern unsigned g_ppu_bg_dec_cyc;
+extern unsigned g_ppu_bg_sub_cyc;
+extern unsigned g_ppu_bg_zero_run_runs;
+extern unsigned g_ppu_bg_zero_run_px;
+extern unsigned g_ppu_bg_skip_runs;
+extern unsigned g_ppu_bg_skip_px;
 }
 #endif
 
@@ -131,15 +139,18 @@ void perf_report(void)
     // Device-pump split. `render` is the scanline compositor; `qry` the
     // event-distance queries; anything left between `halt` above and their sum
     // is runtime_tick()/tick_devices bookkeeping plus DMA steal and IRQ entry.
+    // Split over two lines: the console truncates a single print at ~160
+    // characters, which used to cut off the `loops` field.
     const uint32_t rend_cyc = g_dev_prof_cyc[4];
-    rt_kprintf("[gba] perf2 60f: render %u ms %u ln (%u cyc/ln) | ppu %u | audio %u | tim %u | sio %u | hdma %u | vbl %u | qry %u | loops %u\n",
+    rt_kprintf("[gba] perf2 60f: render %u ms %u ln (%u cyc/ln) | ppu %u | audio %u | tim %u | sio %u\n",
                (unsigned int)to_ms(rend_cyc), (unsigned int)g_dev_prof_renders,
                (unsigned int)(g_dev_prof_renders != 0u
                                   ? rend_cyc / g_dev_prof_renders : 0u),
                (unsigned int)to_ms(g_dev_prof_cyc[3]),
                (unsigned int)to_ms(g_dev_prof_cyc[0]),
                (unsigned int)to_ms(g_dev_prof_cyc[1]),
-               (unsigned int)to_ms(g_dev_prof_cyc[2]),
+               (unsigned int)to_ms(g_dev_prof_cyc[2]));
+    rt_kprintf("[gba] perf2b 60f: hdma %u | vbl %u | qry %u | loops %u\n",
                (unsigned int)to_ms(g_dev_prof_cyc[5]),
                (unsigned int)to_ms(g_dev_prof_cyc[6]),
                (unsigned int)to_ms(g_dev_prof_cyc[7]),
@@ -190,6 +201,32 @@ void perf_report(void)
                (unsigned int)g_ppu_bg_fast_subm);
     g_ppu_bg_fast_px = 0;
     g_ppu_bg_fast_subm = 0;
+
+    // Per-pixel split of the BG decode loop (see g_ppu_bg_dec_cyc in
+    // gba_ppu.cpp): win/zero are the rejection exits, dec/sub the cycles spent
+    // before and after the palette fetch + submit decision.
+    rt_kprintf("[gba] bgpix 60f: win %u zero %u | dec %u sub %u cyc\n",
+               (unsigned int)g_ppu_bg_pix_win,
+               (unsigned int)g_ppu_bg_pix_zero,
+               (unsigned int)g_ppu_bg_dec_cyc,
+               (unsigned int)g_ppu_bg_sub_cyc);
+    g_ppu_bg_pix_win = 0;
+    g_ppu_bg_pix_zero = 0;
+    g_ppu_bg_dec_cyc = 0;
+    g_ppu_bg_sub_cyc = 0;
+
+    // Fully transparent 4bpp runs skipped as a unit (BG_ZERO_RUN); `px` is a
+    // subset of the zero-pixel count on the line above. bgskip counts runs
+    // dropped because a nearer candidate already covered every pixel.
+    rt_kprintf("[gba] bgzero 60f: runs %u px %u | bgskip %u %u\n",
+               (unsigned int)g_ppu_bg_zero_run_runs,
+               (unsigned int)g_ppu_bg_zero_run_px,
+               (unsigned int)g_ppu_bg_skip_runs,
+               (unsigned int)g_ppu_bg_skip_px);
+    g_ppu_bg_zero_run_runs = 0;
+    g_ppu_bg_zero_run_px = 0;
+    g_ppu_bg_skip_runs = 0;
+    g_ppu_bg_skip_px = 0;
 
     g_report_tick = rt_tick_get();
     g_report_cycle = perf_now();

@@ -144,10 +144,10 @@ index 72ca9ec..da73969 100644
      ShadowVerifier vf_{};
      uint8_t  count_mode_ = 0;
 diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
-index d9d1604..1320824 100644
+index d9d1604..6218b4d 100644
 --- a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
 +++ b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
-@@ -28,6 +28,68 @@ static uint64_t ordered_wide_text_span_test_jobs = 0;
+@@ -28,6 +28,90 @@ static uint64_t ordered_wide_text_span_test_jobs = 0;
  extern "C" uint64_t gba_ordered_wide_text_span_test_jobs() { return ordered_wide_text_span_test_jobs; }
  #endif
  
@@ -183,6 +183,22 @@ index d9d1604..1320824 100644
 +// the report can tell whether that path covers the hot scene at all.
 +unsigned g_ppu_bg_fast_px = 0;
 +unsigned g_ppu_bg_fast_subm = 0;
++// Where the per-pixel loop spends its time: dec_cyc covers the window test
++// plus the tile-byte/palette fetch up to (and including) transparent-pixel
++// rejection, sub_cyc the HUD capture plus submit(). pix_win/pix_zero count the
++// two rejection exits, so the pixel budget can be reconciled by hand.
++unsigned g_ppu_bg_pix_win = 0;
++unsigned g_ppu_bg_pix_zero = 0;
++unsigned g_ppu_bg_dec_cyc = 0;
++unsigned g_ppu_bg_sub_cyc = 0;
++// Runs whose four 4bpp tile bytes are all zero, skipped wholesale by
++// GBARECOMP_PPU_BG_ZERO_RUN (runs = count, px = pixels skipped).
++unsigned g_ppu_bg_zero_run_runs = 0;
++unsigned g_ppu_bg_zero_run_px = 0;
++// Runs dropped by GBARECOMP_PPU_BG_RUN_SKIP because a nearer candidate already
++// covered every pixel of the run (runs = count, px = pixels skipped).
++unsigned g_ppu_bg_skip_runs = 0;
++unsigned g_ppu_bg_skip_px = 0;
 +}
 +static inline uint32_t ppu_cyc(void)
 +{
@@ -205,18 +221,24 @@ index d9d1604..1320824 100644
 +#define PPU_BG_PX_ADD(n) (g_ppu_bg_px += (n))
 +#define PPU_BG_SUBM_ADD(n) (g_ppu_bg_subm += (n))
 +#define PPU_BG_FAST_ADD(px, subm) (g_ppu_bg_fast_px += (px), g_ppu_bg_fast_subm += (subm))
++#define PPU_BG_PIX_STAMP(name) const uint32_t name = ppu_cyc()
++#define PPU_BG_PIX_ADD(field, since) (g_ppu_bg_##field += ppu_cyc() - (since))
++#define PPU_BG_ADD(field, n) (g_ppu_bg_##field += (n))
 +#else
 +#define PPU_BG_COUNT(field) ((void)0)
 +#define PPU_BG_CYC_ADD(field, since) ((void)0)
 +#define PPU_BG_PX_ADD(n) ((void)(n))
 +#define PPU_BG_SUBM_ADD(n) ((void)(n))
 +#define PPU_BG_FAST_ADD(px, subm) ((void)(px), (void)(subm))
++#define PPU_BG_PIX_STAMP(name) [[maybe_unused]] const uint32_t name = 0u
++#define PPU_BG_PIX_ADD(field, since) ((void)0)
++#define PPU_BG_ADD(field, n) ((void)(n))
 +#endif
 +
  // Widescreen margin tilemap provider (Step C). When set (by the runtime-side
  // sidecar) and the wide path samples a margin column (hardware x outside
  // 0..239), the BG text-tilemap entry is sourced from this hook (the true
-@@ -721,6 +783,41 @@ void mark_obj_window_scanline(bool* mask,
+@@ -721,6 +805,41 @@ void mark_obj_window_scanline(bool* mask,
      }
  }
  
@@ -258,7 +280,7 @@ index d9d1604..1320824 100644
  template<bool Ordered, bool HardwareOnly = false>
  void render_scanline_impl(uint8_t* rgb,
                                uint32_t y,
-@@ -732,6 +829,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -732,6 +851,7 @@ void render_scanline_impl(uint8_t* rgb,
                                uint32_t kScreenWidth,
                                uint32_t kScreenHeight) {
      GBA_RENDER_PHASE_BEGIN(profile, NativePrepare);
@@ -266,7 +288,7 @@ index d9d1604..1320824 100644
      if (y >= kScreenHeight) return;
  
      uint8_t* row = rgb + y * kScreenWidth * 3;
-@@ -740,17 +838,10 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -740,17 +860,10 @@ void render_scanline_impl(uint8_t* rgb,
          return;
      }
  
@@ -287,7 +309,7 @@ index d9d1604..1320824 100644
  
      // â”€â”€ Windows (GBATEK "LCD I/O Windows") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
      // window_control(x) returns the 6-bit per-pixel mask (BG0-3, OBJ, and bit5
-@@ -782,12 +873,18 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -782,12 +895,18 @@ void render_scanline_impl(uint8_t* rgb,
      };
      const bool win0_row = win0_en && win_v_row(0x44);
      const bool win1_row = win1_en && win_v_row(0x46);
@@ -309,7 +331,7 @@ index d9d1604..1320824 100644
      }
      auto window_control = [&](uint32_t x) -> uint16_t {
          if (!any_window) return 0x3Fu;
-@@ -797,7 +894,24 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -797,7 +916,24 @@ void render_scanline_impl(uint8_t* rgb,
              return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
          return static_cast<uint16_t>(winout & 0x3Fu);
      };
@@ -335,7 +357,7 @@ index d9d1604..1320824 100644
      // The caller gives an immutable row snapshot. Resolve windows once, not
      // once per candidate/layer. No cross-row state or VRAM cache is retained.
      uint8_t row_control[GbaPpu::kScreenWidth];
-@@ -807,26 +921,34 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -807,26 +943,34 @@ void render_scanline_impl(uint8_t* rgb,
      // 0: no opaque candidate; 1: top needs the immediately following layer;
      // 2: final output is known. Jobs are globally ordered before sampling, so
      // completed pixels need no further tile, palette or candidate work.
@@ -381,12 +403,44 @@ index d9d1604..1320824 100644
      };
  
      uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
-@@ -835,22 +957,45 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -835,22 +979,77 @@ void render_scanline_impl(uint8_t* rgb,
      uint32_t second_targets = (bldcnt >> 8) & 0x3Fu;
      uint32_t effect = (bldcnt >> 6) & 0x3u;
  
 -    PixelCandidate top[GbaPpu::kScreenWidth];
 -    PixelCandidate second[GbaPpu::kScreenWidth];
++#if defined(GBARECOMP_PPU_BG_RUN_SKIP)
++    // Dropping a whole BG run is only safe when nothing underneath the winning
++    // candidate is read this line. The output pass reads `second` for BLDCNT
++    // alpha blending (effect == 1) or under a semi-transparent OBJ (OBJ mode 1).
++    // BG layers composite back-to-front before the OBJ pass, so a mode-1 OBJ
++    // that will land on this line later is not in `top` yet: scan OAM once per
++    // line and disable the skip for the line when one exists.
++    bool semi_obj_line = false;
++    if constexpr (!Ordered && !HardwareOnly) {
++        if (effect != 1 && (dispcnt & 0x1000u) != 0) {
++            for (unsigned idx = 0; idx < 128; ++idx) {
++                const uint8_t* const entry = oam + idx * 8u;
++                const auto a0 = load_u16_le(entry);
++                if (((a0 >> 10) & 3u) != 1u) continue;   // OBJ mode 1 only
++                const bool affine = (a0 & 0x100u) != 0;
++                if (!affine && (a0 & 0x200u)) continue;  // hidden sprite
++                const unsigned shape = a0 >> 14;
++                if (shape >= 3) continue;
++                const auto a1 = load_u16_le(entry + 2);
++                int sy = static_cast<int>(a0 & 255u);
++                if (sy >= 160) sy -= 256;
++                const int height = kSpriteWH[shape][a1 >> 14][1] *
++                    ((affine && (a0 & 0x200u)) ? 2 : 1);
++                if (static_cast<int>(y) >= sy && static_cast<int>(y) < sy + height) {
++                    semi_obj_line = true;
++                    break;
++                }
++            }
++        }
++    }
++#endif
++
 +#if defined(GBARECOMP_PPU_ONCHIP_SCRATCH)
 +    PixelCandidate* const top = g_row_top;
 +    PixelCandidate* const second = g_row_second;
@@ -432,7 +486,7 @@ index d9d1604..1320824 100644
          top[x].rgb[0] = backdrop_rgb[0];
          top[x].rgb[1] = backdrop_rgb[1];
          top[x].rgb[2] = backdrop_rgb[2];
-@@ -862,6 +1007,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -862,6 +1061,9 @@ void render_scanline_impl(uint8_t* rgb,
          top[x].target2 = (second_targets & (1u << 5)) != 0;
          top[x].valid = true;
      }
@@ -442,7 +496,7 @@ index d9d1604..1320824 100644
      auto submit = [&](uint32_t x,
                        uint16_t color,
                        int key,
-@@ -870,7 +1018,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -870,7 +1072,7 @@ void render_scanline_impl(uint8_t* rgb,
                        bool target2) {
          PixelCandidate cand;
          cand.color = color;
@@ -451,7 +505,7 @@ index d9d1604..1320824 100644
          to_rgb888(color, cand.rgb);
  #endif
          cand.key = key;
-@@ -975,63 +1123,110 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -975,63 +1177,184 @@ void render_scanline_impl(uint8_t* rgb,
              x += count;
          }
  #else
@@ -465,16 +519,6 @@ index d9d1604..1320824 100644
 -            uint32_t map_off = screen_base + block * 0x800u +
 -                ((tile_y & 31u) * 32u + (tile_x & 31u)) * 2u;
 -            if (map_off + 1 >= 96u * 1024u) continue;
--
--            uint16_t entry = load_u16_le(&vram[map_off]);
--            uint32_t tile_num = entry & 0x03FFu;
--            bool hflip = (entry & 0x0400u) != 0;
--            bool vflip = (entry & 0x0800u) != 0;
--            uint32_t palette_bank = (entry >> 12) & 0x0Fu;
--            uint32_t px = tex_x & 7u;
--            uint32_t py = tex_y & 7u;
--            if (hflip) px = 7u - px;
--            if (vflip) py = 7u - py;
 +        // Batched over 8-pixel tile runs. The per-pixel form below fetched the
 +        // same BG-map entry once per pixel; on this target each of those is a
 +        // PSRAM round trip, which made the map/tile fetches the dominant cost
@@ -500,6 +544,53 @@ index d9d1604..1320824 100644
 +        const bool want_hud = !Ordered && !HardwareOnly;
 +#endif
  
+-            uint16_t entry = load_u16_le(&vram[map_off]);
+-            uint32_t tile_num = entry & 0x03FFu;
+-            bool hflip = (entry & 0x0400u) != 0;
+-            bool vflip = (entry & 0x0800u) != 0;
+-            uint32_t palette_bank = (entry >> 12) & 0x0Fu;
+-            uint32_t px = tex_x & 7u;
+-            uint32_t py = tex_y & 7u;
+-            if (hflip) px = 7u - px;
+-            if (vflip) py = 7u - py;
++        for (uint32_t x = 0; x < kScreenWidth; ) {
++            const uint32_t tex_x = (x + hofs) & (width_px - 1u);
++            const uint32_t tile_x = tex_x >> 3;
++            const uint32_t begin = tex_x & 7u;
++#if defined(GBARECOMP_PPU_BG_RUN_BATCH)
++            const uint32_t count = std::min(8u - begin, kScreenWidth - x);
++#else
++            const uint32_t count = 1u;   // per-pixel form
++#endif
++#if defined(GBARECOMP_PPU_BG_RUN_SKIP)
++            // A run every pixel of which is already covered by a nearer
++            // candidate cannot reach the output: drop it before the map/tile
++            // fetch and the per-pixel decode. Valid only when `second` is never
++            // read this line (see semi_obj_line above) and no foreign HUD cell
++            // capture is pending.
++            if constexpr (!Ordered && !HardwareOnly) {
++                if (!want_hud && !semi_obj_line && effect != 1) {
++                    uint32_t hidden = 0;
++                    for (; hidden < count; ++hidden) {
++                        const PixelCandidate& cover = top[x + hidden];
++                        if (cover.key >= layer_key || cover.layer == 4) break;
++                    }
++                    if (hidden == count) {
++                        PPU_BG_ADD(skip_runs, 1u);
++                        PPU_BG_ADD(skip_px, count);
++                        x += count;
++                        continue;
++                    }
++                }
++            }
++#endif
++            const uint32_t map_off = map_row + (tile_x >> 5) * 0x800u +
++                (tile_x & 31u) * 2u;
++            if (map_off + 1u >= 96u * 1024u) {
++                x += count;
++                continue;
++            }
+ 
 -            uint8_t pal_idx = 0;
 -            if (color256) {
 -                uint32_t tile_addr = char_base + tile_num * 64u + py * 8u + px;
@@ -513,30 +604,6 @@ index d9d1604..1320824 100644
 -                pal_idx = (px & 1u) ? (packed >> 4) : (packed & 0x0Fu);
 -                pal_idx = static_cast<uint8_t>(
 -                    pal_idx | static_cast<uint8_t>(palette_bank << 4));
-+        for (uint32_t x = 0; x < kScreenWidth; ) {
-+            const uint32_t tex_x = (x + hofs) & (width_px - 1u);
-+            const uint32_t tile_x = tex_x >> 3;
-+            const uint32_t begin = tex_x & 7u;
-+#if defined(GBARECOMP_PPU_BG_RUN_BATCH)
-+            const uint32_t count = std::min(8u - begin, kScreenWidth - x);
-+#else
-+            const uint32_t count = 1u;   // per-pixel form
-+#endif
-+            const uint32_t map_off = map_row + (tile_x >> 5) * 0x800u +
-+                (tile_x & 31u) * 2u;
-+            if (map_off + 1u >= 96u * 1024u) {
-+                x += count;
-+                continue;
-             }
--            if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
- 
--            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
--            if (!Ordered && !HardwareOnly && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
--                                            tile_y, x, y)) {
--                PixelCandidate& hud = foreign_hud_bg[x];
--                hud.color = color;
--#if !defined(GBARECOMP_SCANLINE_HLE)
--                to_rgb888(color, hud.rgb);
 +            PPU_BG_COUNT(runs);
 +            PPU_PHASE_STAMP(t_bg_fetch);
 +            const uint16_t entry = load_u16_le(&vram[map_off]);
@@ -551,6 +618,39 @@ index d9d1604..1320824 100644
 +            PPU_BG_CYC_ADD(fetch_cyc, t_bg_fetch);
 +            PPU_PHASE_STAMP(t_bg_pix);
 +
++#if defined(GBARECOMP_PPU_BG_ZERO_RUN)
++            // 4bpp: px 0..7 of a run map onto four consecutive tile bytes, so a
++            // single 32-bit read serves the whole run. All four bytes zero means
++            // every pixel of the run is color 0, i.e. transparent and dropped by
++            // the per-pixel test below: skip the run without visiting pixels.
++            // Bit-identical to the byte-at-a-time path (little-endian order,
++            // nibble selection unchanged); only 256-color tiles and runs that
++            // would read past 96 KiB keep the old path.
++            uint32_t tile_word = 0u;
++            bool word_ok = false;
++            if (!color256 && tile_row + 4u <= 96u * 1024u) {
++                std::memcpy(&tile_word, &vram[tile_row], sizeof(tile_word));
++                word_ok = true;
++                if (tile_word == 0u) {
++                    PPU_BG_PX_ADD(count);
++                    PPU_BG_ADD(pix_zero, count);
++                    PPU_BG_ADD(zero_run_runs, 1u);
++                    PPU_BG_ADD(zero_run_px, count);
++                    PPU_BG_CYC_ADD(pix_cyc, t_bg_pix);
++                    x += count;
++                    continue;
++                }
+             }
+-            if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
++#endif
+ 
+-            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+-            if (!Ordered && !HardwareOnly && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+-                                            tile_y, x, y)) {
+-                PixelCandidate& hud = foreign_hud_bg[x];
+-                hud.color = color;
+-#if !defined(GBARECOMP_SCANLINE_HLE)
+-                to_rgb888(color, hud.rgb);
 +            // 4bpp pixels share one tile byte in pairs; reuse the last fetch so
 +            // a run costs four tile-data reads instead of eight.
 +            uint32_t cached_addr = 0xFFFFFFFFu;
@@ -558,35 +658,34 @@ index d9d1604..1320824 100644
 +
 +            for (uint32_t j = 0; j < count; ++j) {
 +                PPU_BG_COUNT(px);
++                PPU_BG_PIX_STAMP(t_pix);
 +                const uint32_t sx = x + j;
-+                if ((!no_window || Ordered) && !layer_enabled(sx, layer)) continue;
++                if ((!no_window || Ordered) && !layer_enabled(sx, layer)) {
++                    PPU_BG_COUNT(pix_win);
++                    PPU_BG_PIX_ADD(dec_cyc, t_pix);
++                    continue;
++                }
 +
 +                const uint32_t px = hflip ? 7u - (begin + j) : (begin + j);
 +                uint8_t pal_idx;
 +                if (color256) {
 +                    const uint32_t tile_addr = tile_row + px;
-+                    if (tile_addr >= 96u * 1024u) continue;
++                    if (tile_addr >= 96u * 1024u) {
++                        PPU_BG_PIX_ADD(dec_cyc, t_pix);
++                        continue;
++                    }
 +                    pal_idx = vram[tile_addr];
 +                } else {
 +                    const uint32_t tile_addr = tile_row + (px >> 1);
-+                    if (tile_addr >= 96u * 1024u) continue;
-+                    if (tile_addr != cached_addr) {
-+                        cached_addr = tile_addr;
-+                        cached_byte = vram[tile_addr];
++                    if (tile_addr >= 96u * 1024u) {
++                        PPU_BG_PIX_ADD(dec_cyc, t_pix);
++                        continue;
 +                    }
-+                    pal_idx = (px & 1u) ? (cached_byte >> 4) : (cached_byte & 0x0Fu);
-+                    pal_idx = static_cast<uint8_t>(
-+                        pal_idx | static_cast<uint8_t>(palette_bank << 4));
-+                }
-+                if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
-+
-+                const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
-+                if (want_hud && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
-+                                                line_tile_y, sx, y)) {
-+                    PixelCandidate& hud = foreign_hud_bg[sx];
-+                    hud.color = color;
-+#if !defined(GBARECOMP_SCANLINE_HLE) && !defined(GBARECOMP_PPU_DEFER_RGB)
-+                    to_rgb888(color, hud.rgb);
++#if defined(GBARECOMP_PPU_BG_ZERO_RUN)
++                    if (word_ok) {
++                        pal_idx = static_cast<uint8_t>(
++                            (tile_word >> ((px >> 1) * 8u)) & 0xFFu);
++                    } else
  #endif
 -                hud.key = static_cast<int>(bg_priority * 256u + 128u + layer);
 -                hud.layer = static_cast<uint8_t>(layer);
@@ -594,6 +693,33 @@ index d9d1604..1320824 100644
 -                    ((first_targets & (1u << layer)) != 0);
 -                hud.target2 = (second_targets & (1u << layer)) != 0;
 -                hud.valid = true;
++                    {
++                        if (tile_addr != cached_addr) {
++                            cached_addr = tile_addr;
++                            cached_byte = vram[tile_addr];
++                        }
++                        pal_idx = cached_byte;
++                    }
++                    pal_idx = (px & 1u) ? (pal_idx >> 4) : (pal_idx & 0x0Fu);
++                    pal_idx = static_cast<uint8_t>(
++                        pal_idx | static_cast<uint8_t>(palette_bank << 4));
++                }
++                if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) {
++                    PPU_BG_COUNT(pix_zero);
++                    PPU_BG_PIX_ADD(dec_cyc, t_pix);
++                    continue;
++                }
++
++                const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
++                PPU_BG_PIX_ADD(dec_cyc, t_pix);
++                PPU_BG_PIX_STAMP(t_sub);
++                if (want_hud && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
++                                                line_tile_y, sx, y)) {
++                    PixelCandidate& hud = foreign_hud_bg[sx];
++                    hud.color = color;
++#if !defined(GBARECOMP_SCANLINE_HLE) && !defined(GBARECOMP_PPU_DEFER_RGB)
++                    to_rgb888(color, hud.rgb);
++#endif
 +                    hud.key = layer_key;
 +                    hud.layer = static_cast<uint8_t>(layer);
 +                    hud.target1 = (no_window || blend_enabled(sx)) && layer_target1;
@@ -603,6 +729,7 @@ index d9d1604..1320824 100644
 +                PPU_BG_COUNT(subm);
 +                submit(sx, color, layer_key, static_cast<uint8_t>(layer),
 +                       (no_window || blend_enabled(sx)) && layer_target1, layer_target2);
++                PPU_BG_PIX_ADD(sub_cyc, t_sub);
              }
 -            submit(x, color,
 -                   static_cast<int>(bg_priority * 256u + 128u + layer),
@@ -614,7 +741,7 @@ index d9d1604..1320824 100644
          }
  #endif
      };
-@@ -1156,6 +1351,8 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1156,6 +1479,8 @@ void render_scanline_impl(uint8_t* rgb,
      };
  
      GBA_RENDER_PHASE_MARK(profile, NativeBackground);
@@ -623,7 +750,7 @@ index d9d1604..1320824 100644
      if constexpr (!Ordered) {
          if (bg_mode == 0) {
              render_regular_bg(3, 0x0E, 0x1C);
-@@ -1176,6 +1373,8 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1176,6 +1501,8 @@ void render_scanline_impl(uint8_t* rgb,
  
      }
      GBA_RENDER_PHASE_MARK(profile, NativeForeign);
@@ -632,7 +759,7 @@ index d9d1604..1320824 100644
      // A bounded host-owned overlay is intentionally a native-world-only
      // presentation layer. It is composed after every guest BG candidate has
      // resolved but before the normal guest OBJ pass, so Link/HUD objects remain
-@@ -1211,9 +1410,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1211,9 +1538,9 @@ void render_scanline_impl(uint8_t* rgb,
                          cand.color = blend_alpha_gba555(overlay->pixels[source],
                                                           old_top.color, alpha,
                                                           16u - alpha);
@@ -644,7 +771,7 @@ index d9d1604..1320824 100644
                          // Same synthetic BG2 identity as a full foreign frame;
                          // regular guest OBJ keys are always in front of 0x10000.
                          cand.key = 0x10000;
-@@ -1239,7 +1438,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1239,7 +1566,7 @@ void render_scanline_impl(uint8_t* rgb,
          // to native BG/window state: keeping a room-authored window mask here
          // leaked screen-fixed house/door tiles over later foreign rooms. Guest
          // OBJ composition (including the focused Link OBJ) still happens below.
@@ -653,7 +780,7 @@ index d9d1604..1320824 100644
              for (uint32_t x = 0; x < kScreenWidth; ++x) {
                  if (foreign_hud_bg[x].valid) {
                      top[x] = foreign_hud_bg[x];
-@@ -1248,9 +1447,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1248,9 +1575,9 @@ void render_scanline_impl(uint8_t* rgb,
                  }
                  PixelCandidate cand;
                  cand.color = foreign[y * GbaPpu::kScreenWidth + x];
@@ -665,7 +792,7 @@ index d9d1604..1320824 100644
                  cand.key = 0x10000;
                  cand.layer = 2;
                  cand.target1 = blend_enabled(x) &&
-@@ -1264,6 +1463,8 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1264,6 +1591,8 @@ void render_scanline_impl(uint8_t* rgb,
  
      }
      GBA_RENDER_PHASE_MARK(profile, NativeObjects);
@@ -674,7 +801,7 @@ index d9d1604..1320824 100644
      constexpr uint32_t obj_tile_base = 0x10000u;
      const bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
      const uint8_t* obj_pal = pal + 0x200;
-@@ -1453,11 +1654,17 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1453,11 +1782,17 @@ void render_scanline_impl(uint8_t* rgb,
      }
  
      GBA_RENDER_PHASE_MARK(profile, NativeOutput);
@@ -692,7 +819,7 @@ index d9d1604..1320824 100644
          // Alpha blend top (1st target) with the layer below (2nd target). Per
          // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
          // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
-@@ -1479,7 +1686,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1479,7 +1814,7 @@ void render_scanline_impl(uint8_t* rgb,
                  : darken_gba555(top[x].color, bldy);
              to_rgb888(adjusted, dst);
          } else {
@@ -701,7 +828,7 @@ index d9d1604..1320824 100644
              to_rgb888(top[x].color, dst);
  #else
              dst[0] = top[x].rgb[0];
-@@ -1488,6 +1695,11 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1488,6 +1823,11 @@ void render_scanline_impl(uint8_t* rgb,
  #endif
          }
      }
