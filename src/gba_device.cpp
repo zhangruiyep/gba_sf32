@@ -100,6 +100,14 @@ extern unsigned g_dev_prof_cyc[8];
 extern unsigned g_dev_prof_renders;
 extern unsigned g_dev_prof_loops;
 extern unsigned g_ppu_phase_cyc[5];
+extern unsigned g_ppu_bg_layer_rows;
+extern unsigned g_ppu_bg_runs;
+extern unsigned g_ppu_bg_px;
+extern unsigned g_ppu_bg_subm;
+extern unsigned g_ppu_bg_fetch_cyc;
+extern unsigned g_ppu_bg_pix_cyc;
+extern unsigned g_ppu_bg_fast_px;
+extern unsigned g_ppu_bg_fast_subm;
 }
 #endif
 
@@ -145,10 +153,43 @@ void perf_report(void)
                (unsigned int)to_ms(g_ppu_phase_cyc[2]),
                (unsigned int)to_ms(g_ppu_phase_cyc[3]),
                (unsigned int)to_ms(g_ppu_phase_cyc[4]));
+    const uint32_t bg_phase_cyc = g_ppu_phase_cyc[1];
     for (unsigned int i = 0; i < 5u; ++i)
     {
         g_ppu_phase_cyc[i] = 0;
     }
+
+    // Text-BG work counters (see g_ppu_bg_* in gba_ppu.cpp): divides the `bg`
+    // bucket by actual work so an unexpectedly high cycles/pixel shows up as a
+    // per-unit cost rather than a guess. Kept short enough for the ~128-column
+    // console, so the derived ratios are left to the log reader.
+    {
+        const uint32_t bg_cyc = bg_phase_cyc;
+        rt_kprintf("[gba] perf4 60f: rows %u runs %u px %u subm %u | bg %u fetch %u pix %u cyc\n",
+                   (unsigned int)g_ppu_bg_layer_rows,
+                   (unsigned int)g_ppu_bg_runs,
+                   (unsigned int)g_ppu_bg_px,
+                   (unsigned int)g_ppu_bg_subm,
+                   (unsigned int)bg_cyc,
+                   (unsigned int)g_ppu_bg_fetch_cyc,
+                   (unsigned int)g_ppu_bg_pix_cyc);
+        g_ppu_bg_layer_rows = 0;
+        g_ppu_bg_runs = 0;
+        g_ppu_bg_px = 0;
+        g_ppu_bg_subm = 0;
+        g_ppu_bg_fetch_cyc = 0;
+        g_ppu_bg_pix_cyc = 0;
+    }
+
+    // Coverage of the 4bpp/no-window fast path in the BG run loop (see
+    // g_ppu_bg_fast_px in gba_ppu.cpp). Compare against `px`/`subm` in perf4:
+    // if the fast path covers most pixels, the per-pixel work is what it is;
+    // if it does not, the generic (windowed / 256-color) loop is the hot one.
+    rt_kprintf("[gba] bgfast 60f: px %u subm %u\n",
+               (unsigned int)g_ppu_bg_fast_px,
+               (unsigned int)g_ppu_bg_fast_subm);
+    g_ppu_bg_fast_px = 0;
+    g_ppu_bg_fast_subm = 0;
 
     g_report_tick = rt_tick_get();
     g_report_cycle = perf_now();
