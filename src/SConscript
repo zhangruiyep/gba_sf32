@@ -92,7 +92,7 @@ print('[gba] runtime features: %s' % (' '.join(runtime_cppdefines) or '(none)'))
 
 # ── Host/device application layer ────────────────────────────────────────
 app_src = ['main.c', 'gba_device.cpp', 'gba_device_stubs.cpp', 'gba_psram.c',
-           'gba_cart_sd.c']
+           'gba_cart_sd.c', 'gba_input.c', 'gba_pad.c']
 if os.path.isfile(gen_c):
     app_src.append(gen_c)
 

@@ -23,6 +23,8 @@
 #include <string.h>
 
 #include "mem_section.h"
+#include "gba_input.h"
+#include "gba_pad.h"
 
 #define GBA_WIDTH        240
 #define GBA_HEIGHT       160
@@ -35,7 +37,12 @@
 #define PANEL_WIDTH      LCD_HOR_RES_MAX
 #define PANEL_HEIGHT     LCD_VER_RES_MAX
 #define GBA_OFFSET_X     ((PANEL_WIDTH - GBA_WIDTH) / 2)
-#define GBA_OFFSET_Y     ((PANEL_HEIGHT - GBA_HEIGHT) / 2)
+/*
+ * The window sits above the panel centre: the strip below it has to hold the
+ * d-pad and the face buttons, while the strip above only carries the shoulder
+ * buttons. 96 leaves ~96 lines on top and ~194 below.
+ */
+#define GBA_OFFSET_Y     96
 
 /* GBA frame, converted from the PPU output. On-chip SRAM. */
 L1_NON_RET_BSS_SECT_BEGIN(gba_fb)
@@ -98,8 +105,15 @@ static void gba_lcd_init(void)
         return;
     }
 
-    /* Clear the whole panel once; the borders stay black after that. */
+    /*
+     * Clear the whole panel once, then paint the gamepad into the free bands
+     * above and below the GBA window (Phase 3.1). Both happen before the single
+     * full-panel flush below, so the pad rides along with a transfer that was
+     * already being paid for.
+     */
     memset(g_lcd_fb, 0, sizeof(g_lcd_fb));
+    gba_pad_draw((rt_uint16_t *)g_lcd_fb, PANEL_WIDTH, PANEL_HEIGHT,
+                 GBA_OFFSET_Y, GBA_OFFSET_Y + GBA_HEIGHT - 1);
     RT_ASSERT(drv_lcd_fb_set(&g_panel_fb_desc) == RT_EOK);
 
     LCD_AreaDef full_area =
@@ -121,6 +135,7 @@ static void gba_lcd_init(void)
     rt_kprintf("[gba] panel %dx%d, GBA window at (%d,%d) %dx%d\n",
                PANEL_WIDTH, PANEL_HEIGHT,
                GBA_OFFSET_X, GBA_OFFSET_Y, GBA_WIDTH, GBA_HEIGHT);
+    rt_kprintf("[gba] pad: gamepad painted, touch hit-tests against it\n");
 }
 
 /*
@@ -215,6 +230,9 @@ int main(void)
 #ifdef BSP_USING_LCD_FRAMEBUFFER
     gba_lcd_init();
 #endif
+
+    /* Phase 3.1 step 1: touch/key bring-up, logs only, no key mapping yet. */
+    gba_input_init();
 
     gba_device_run(g_gba_arena, (unsigned int)sizeof(g_gba_arena));
 

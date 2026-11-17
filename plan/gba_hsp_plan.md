@@ -11,11 +11,11 @@
 | Phase 2-A | 仓库根独立 scons 工程骨架 | ✅ 编译通过（`main.bin` 325,240 B） |
 | Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（当时的「滚动彩条」实为 165×15 坐标 bug，已在 2-C 修复） |
 | Phase 2-C | runtime 移植到 SiFli HAL | ✅ 完成并真机验证（BIOS 从 reset vector 跑到空闲态，236 个函数入口，无 fault；修复送屏几何后居中 240×160 白块，2026-11-11 复烧确认） |
-| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.3。性能优化中（2026-11-16：≈7.2 fps / 13.9% 实时）；2026-11-17 的 BG run 优化因画面异常整批回退，见 §0.4–§0.6；目标已由 60 fps 修正为 7→10 fps，见 §0.7–§0.8；11-17 逐步小改三组实测见 §0.9（当前 6.7–7.3 fps 赛道 / 9.0 菜单） |
-| Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 模板表去重） | 📋 候选已归档（见 §3.2.4）。2-D 未超限（ROM 余 371,910 B），非阻塞；Tier3 已使补种子路线不再必要，是否实施待定 |
-| Phase 3 | 音频 / 按键 / 存档 | ⏳ 未开始 |
+| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.3。性能优化中（2026-11-16：≈7.2 fps / 13.9% 实时）；2026-11-17 的 BG run 优化因画面异常整批回退，见 §0.4–§0.6；目标已由 60 fps 修正为 7→10 fps，见 §0.7–§0.8；11-17 逐步小改三组实测见 §0.9（6.7–7.3 fps 赛道 / 9.0 菜单）；11-17 16:29 加上虚拟手柄后，赛道 3.3–5.9 fps，见 §0.10 |
+| Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 模板表去重） | 📋 候选已归档（见 §3.2.4）。2-D 未超限（ROM 余 353 KB），非阻塞；Tier3 已使补种子路线不再必要，是否实施待定 |
+| Phase 3 | 音频 / 按键 / 存档 | 🔄 进行中：**按键输入已跑通**（3.1 step 1–3 完成，2026-11-17 16:29 真机验证 Start/A/十字键均能驱动游戏）；音频与存档经决策暂不做，性能优化暂缓，见 §0.10 |
 
-**烧录已打通**：`sftool 0.2.5`（`C:\Users\zhang\.sifli\tools\sftool\0.2.5`）+ `build_.../uart_download.bat`，串口 COM14（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000` 写入成功，屏幕居中 240×160 区域出画面。
+**烧录已打通**：`sftool 0.2.5`（`C:\Users\zhang\.sifli\tools\sftool\0.2.5`）+ `build_.../uart_download.bat`，串口 COM14（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000` 写入成功，屏幕 **(75,96)-(314,255)** 窗口出画面（11-17 起窗口上移，上下留给虚拟手柄）。
 
 > **约定：后续下载烧录由用户本人执行**，AI 只负责编译并给出烧录命令。
 
@@ -24,6 +24,10 @@
 
 > **Phase 2-D 已完成**（2026-11-13 12:12 烧录，屏幕出游戏画面），证据见 §0.3。
 > 后续不再为「让派发表覆盖所有函数」而补种子，miss 一律由 Tier3 解释器兜底。
+
+> **下一步（优先级待用户定）**：① 补验 B / Select / L / R（2026-11-17 日志未覆盖）；
+> ② 按键按下高亮（需「面板级 fb + 局部 dirty rect」）；③ KEY1/KEY2 → Start/Select 备份映射；
+> ④ 性能 A/B/C 三项（已按用户决策暂缓）。音频与存档不在范围。
 
 ### 0.1 Phase 2-D 问题与决策（均已于 2026-11-13 关闭）
 
@@ -294,7 +298,7 @@ RAM 余 278,460 B，仅既有 `g_force_interp` / RWX 告警。**真机复烧确�
 2. **等效主频**：纯软件扮演 16.78 MHz ARM7 + 全套 ASIC，经验需 ≥1 GHz 级通用核；240 MHz M33 差约一个数量级。
 3. **串行惩罚**：真机并行的模块（PPU / DMA / 音频）必须单独核算独占时间，不得并入 CPU 预算。
 
-**目标修正**：60 fps → 分阶段 **7 → 10 fps**（当前 4.86；菜单场景 7.2）。60 fps 不再作为验收项。
+**目标修正**：60 fps → 分阶段 **7 → 10 fps**（当时赛道 4.86 / 菜单 7.2；2026-11-17 16:29 复测：开场/菜单 6.2–7.5、赛道 3.3–5.9）。60 fps 不再作为验收项。
 
 ### 0.8 EPIC 2D 加速能否用于 PPU（2026-11-17，评估结论：只做边角）
 
@@ -371,6 +375,64 @@ MARIO KART 不透明像素仅 **37.6%**（2.60 M / 6.91 M），8 像素 run 被�
 全串行相加即 `wall`。BG 内部 93 cyc/px（硬上限 104）；**最大单项是 `sub` 96 cyc/次提交**——
 每次提交都写 12 字节 `second[]`，而 `effect != 1` 时该行无人读。下一步候选按此排序：
 A) 免写 `second[]`；B) out 阶段批量化；C) `disp`（Phase 2-E1 寄存器分配）。
+（2026-11-17 用户决策：这三项**暂缓**，先做按键输入；「性能不达标，音频和存档没有意义」→ 后续又定为音频/存档不做。）
+
+### 0.10 Phase 3.1 按键输入：虚拟手柄 + 触摸映射（2026-11-17，真机可用）
+
+数据源 `窗口1_COM14_(2026-11-17-16-29-09)_ui.log`。按「一次一小步 + 用户烧录确认」分三步：
+
+| 步 | 内容 | 结果 |
+|----|------|------|
+| 1 | 触摸 / 实体键 bring-up（`src/gba_input.c`） | ✅ FT6146 报点方向正确（驱动内已翻转为面板坐标），KEY1/KEY2 可读 |
+| 2 | 虚拟手柄绘制（`src/gba_pad.c`，纯 rect/circle/capsule 填充，无字体/图片/分配） | ✅ 用户确认布局与配色 |
+| 3 | 触摸命中 → guest `KEYINPUT` | ✅ 游戏可操作（Start 进菜单、A 确认、十字键移动） |
+
+**屏幕几何**：GBA 窗口由居中 `(75,145)` 上移到 **`(75,96)-(314,255)`**，上方 96 行只放 L/R，
+下方 194 行放十字键与 AB/Select/Start。机身铺满整屏（GBA 紫 `RGB565(74,62,132)`），
+灰按键 `RGB565(196,196,204)`，边框 `RGB565(104,100,136)`。
+
+**布局与命中**（`band_y0 = 281`，即窗口底 255 + 1 + `BAND_TOP_GAP 25`）：
+
+| 控件 | 位置（面板坐标） | 命中形状 |
+|------|------|------|
+| 十字键 | 中心 (72, 353) | 方框 ±61，中心 ±19 死区；越出死区按轴向判，可同时给两个方向 |
+| A / B | (330, 334) / (262, 384) | 圆 r=30 |
+| Select / Start | (178, 329) / (178, 377) | 圆 r=16，竖排在十字键右侧（参考 GBA 面板） |
+| L / R | (18,28)-(95,65) / (294,28)-(371,65) | 胶囊 |
+
+命中判定不另存常量，直接复用 `gba_pad_draw()` 记下的 `g_pad_band_y0` 与
+`controls_ready` / `shoulder_ready` 标志，绘制与触摸区不会漂移。十字键用方形框而非精确十字轮廓，
+是为了在电容屏上更容易搓出对角（四角未绘制区域也会触发方向，属有意设计）。
+
+**映射路径**：`gba_pad_hit()` → guest 位序的按下掩码（bit0 A … bit9 L）→ `gba_input.c` 取反并掩
+`0x03FF` → `gba_device.cpp: gba_device_set_keyinput()` → `g_bus->io().set_keyinput()` → `IoReg::KEYINPUT`。
+UP 清 0，DOWN/MOVE 重新命中，掩码不变则不写寄存器。日志 `[gba] pressed=0x%03x keyinput=0x%03x`。
+
+**日志证据**：
+
+| 报点 | 结果 | 判定 |
+|------|------|------|
+| (330,353) / (322,355) / (321,358) | `pressed=0x001` → `keyinput=0x3fe` | A ✅ |
+| (175,389) / (169,387) | `pressed=0x008` → `0x3f7` | Start ✅ |
+| (72,316) | `pressed=0x040` → `0x3bf` | Up ✅ |
+| (20,360) | `pressed=0x020` → `0x3df` | Left ✅ |
+| (304,355) / (311,365) / (325,365) | 无 `pressed` 行 | A/B 之间的空隙，正常 miss |
+| (153,379) / (1,348) / (1,369) | 无 `pressed` 行 | 十字键方框外，正常 miss |
+
+**两个实测结论**：
+
+1. **滑动不发 MOVE**：按住滑动时驱动连续上报的是 `ev=2`（DOWN）而非 `ev=3`（MOVE）——
+   16:33:11:873–12:078 连续 16 条 `ev=2`，坐标从 (324,328) 平滑走到 (319,348)，全程没有 `ev=3`
+   （整份日志 0 条）。当前 DOWN/MOVE 走同一分支，所以不影响手感，但「MOVE 路径可用」这份日志证明不了。
+   按时序看，`tp ev=2` → `pressed=` 相隔约 3–10 ms，即一个 10 ms 轮询周期内完成映射。
+2. **未覆盖**：B、Select、L、R 本次没按（无 `0x002/0x004/0x100/0x200`）；KEY1/KEY2 仍只打印电平，
+   未映射到 GBA 按键；按下高亮未做。
+
+**性能影响**：手柄只在开机画一次（与清屏共用那一次整屏 flush），之后每帧仍只刷 240×160 窗口
+（`lcd 60f: convert 166 ms, flush 24 ms`）；输入线程 10 ms 轮询、只在掩码变化时写寄存器。
+本份日志的帧率：开场/菜单 **6.2–7.5 fps**（`wall` 7942–9618 ms），进比赛后 **4.4–5.9 fps**，
+重场景（`disp` 2000+ calls / `render` 8.5 s per 60f / 212k cyc per line）**3.3–3.5 fps**（`wall` 17086–18430 ms）。
+与 §0.9 的 6.7–7.3 属不同场景，不是 GUI 回退。
 
 ## 1. 硬件确认（锁定）
 
@@ -413,6 +475,7 @@ A) 免写 `second[]`；B) out 阶段批量化；C) `disp`（Phase 2-E1 寄存器
 片上 SRAM 512KB (0x20000000):
 ├── rt-thread + SDK 栈堆        ~100KB
 ├── 2-C 固件实测占用            133,980 B
+├── 3.1 固件实测占用            244,876 B（余 278,276 B，含 32KB 主线程栈）
 └── 结论：装不下 GbaBus(~386KB)+两帧(~230KB)=616KB → 已改 PSRAM placement new
 
 OPI-PSRAM 8MB (0x60000000):
@@ -435,10 +498,11 @@ TF 卡（SPI1，板级 bsp_pinmux 已配好）:
 └── ROM 文件固定在卡根目录 `/gba.gba`
 
 容量结论（2026-11-11 实测，ROM 移到 TF 卡）:
-  ROM 本体不占 NOR，只需装重编译代码。真实链接结果：
+  ROM 本体不占 NOR，只需装重编译代码。当前链接结果（2026-11-17，含 Phase 3.1 手柄）：
   8 shard .text 12,863,180 + dispatch 2,567,136 + BIOS/runtime/SDK ~880,000
-  = main.bin 16,342,472 B (15.585 MiB)  vs  分区 16,613,376 B (15.84 MiB)
-  余量 270,904 B（264 KB）——已通过，无需瘦身。
+  = Binary 16,369,908 B (15.611 MiB)  vs  分区 16,613,376 B (15.84 MiB)
+  余量 353,220 B（345 KB）——已通过，无需瘦身。
+  （2-D 时为 16,342,472 B / 余 270,904 B；手柄与输入代码占约 27 KB。）
   代价：symbol_map.cpp（519,526 B）不链接，串口 trace 只显示地址不显示函数名；
   若 2-E 需要恢复函数名，用压缩符号表（区间编码）把 519 KB 压到 ~120 KB。
   构建命令见 .trae/documents/gba_phase2d_small_rom_bringup.md §8。
@@ -579,23 +643,27 @@ GBA ROM ──▶ gbarecomp ──▶ C 代码 ──▶ arm-none-eabi-gcc ─�
 | std::chrono → 时间 | Cortex-M33 DWT cycle counter (内置，直接访问寄存器) | ARM Cortex-M33 架构，SDK `bf0_hal_cortex.h` 有封装 |
 | 文件系统 → ROM/保存 | HAL FLASH (`bf0_hal_mpi`) + SPI TF 卡 | SDK `bf0_hal_mpi.h`, `example/storage` |
 
-### 2.4 屏幕方案：居中留黑边
+### 2.4 屏幕方案：窗口上移，上下留作虚拟手柄
 
 ```
-390 × 450 屏幕
+390 × 450 面板
 ┌───────────────────────┐
-│     黑边 (75px)         │ ← (390-240)/2 = 75
+│  L 胶囊        R 胶囊    │ ← 上方 96 行（只放肩键）
 │  ┌─────────────────┐   │
 │  │                 │   │
-│  │   240×160 GBA   │   │ ← (450-160)/2 = 145 顶部黑边
+│  │   240×160 GBA   │   │ ← y0 = 96（居中为 145，但下方要放十字键+AB，故上移）
 │  │   帧缓冲         │   │
 │  │                 │   │
 │  └─────────────────┘   │
-│     黑边              │
+│  十字键   选择·开始  A    │ ← 下方 194 行（band_y0 = 281）
+│           B            │
 └───────────────────────┘
+     ← 水平左右各 75 px
 ```
 
-**实现**：用 LCDC 的 LayerSetData 设置 ROI 区域 (x0=75, y0=145, x1=314, y1=304)，背景层设为黑色。
+**实现**：LCDC ROI `(x0=75, y0=96, x1=314, y1=255)`。开机把整个面板填成 GBA 紫机身色 `RGB565(74,62,132)`
+并用 `gba_pad_draw()` 画上手柄，与清屏共用同一次整屏 flush；之后只注册 240×160 窗口帧存逐帧刷新，
+机身与手柄不再重绘。触摸命中由 `gba_pad_hit()` 用同一套布局常量完成（几何见 §0.10）。
 
 ---
 
@@ -821,8 +889,8 @@ gba_recompile.exe --rom "roms\Mario Kart Super Circuit (U).gba" --out out\cart_s
 | 2-B | 显示后端：LCD 中央 240×160 写 RGB565 彩条 | ✅ 已烧录验证（当时看到的「滚动彩条」实为 165×15 的坐标 bug，见 2-C 修复） |
 | 2-C | runtime 移植（`src/gba/*` + `runtime_arm.cpp` + `runtime_bus_bridge.cpp` 编入工程） | ✅ 真机跑通，居中 240×160 已复烧确认 |
 | 2-D | 接上卡带：cart → dispatch → PPU → 送屏链路 | ✅ 真机出游戏画面（2026-11-13 12:12），miss 由 Tier3 自愈（详见 §0.3） |
-| 2-E | 真实 ROM 接入：容量优化（dispatch 压缩 / -Oz / ROM LZ4）+ 端到端验证 | ⏳ 未开始 |
-| 2-F | 按键 / 音频 / 存档 | ⏳ 未开始（Phase 3） |
+| 2-E | 真实 ROM 接入：容量优化（dispatch 压缩 / -Oz / ROM LZ4）+ 端到端验证 | 📋 归档为 Phase 2-E 候选（见 §3.2.4）：ROM 尚余 353 KB，未超限，非阻塞 |
+| 2-F | 按键 / 音频 / 存档 | 🔄 按键已完成（触摸虚拟手柄 → `KEYINPUT`，2026-11-17）；音频 / 存档暂不做 |
 
 **工程结构（已落地，独立于 SDK 目录）**：
 
@@ -835,10 +903,12 @@ e:\work\Github\gba_sf32\
 ├── proj.conf               # 主线程栈/优先级、ULOG 配置
 ├── rtconfig.py             # 空文件（必须存在，否则 rtconfig.LINK_SCRIPT_SRC 为 None）
 ├── src/
-│   ├── SConscript          # gba_app（main.c + 宿主层 + BIOS blob）+ gba_runtime（gbarecomp）
-│   ├── main.c              # LCD 后端 + GBA arena，调 gba_device_run()
-│   ├── gba_device.cpp      # 宿主层：placement new Bus/Ppu、BIOS 装载、dispatch 主循环
-│   └── gba_device_stubs.cpp# overlay/dispatch-miss/未实现指令等 abort 桩
+│   ├── SConscript          # gba_app（main.c + 宿主层 + 输入/手柄 + BIOS blob）+ gba_runtime（gbarecomp）
+│   ├── main.c              # LCD 后端 + 面板几何 + gba_pad_draw() + GBA arena，调 gba_device_run()
+│   ├── gba_device.cpp      # 宿主层：placement new Bus/Ppu、BIOS 装载、dispatch 主循环、set_keyinput 桥
+│   ├── gba_device_stubs.cpp# overlay/dispatch-miss/未实现指令等 abort 桩
+│   ├── gba_input.c / .h    # Phase 3.1：触摸线程，报点 → gba_pad_hit() → KEYINPUT
+│   └── gba_pad.c / .h      # Phase 3.1：虚拟手柄绘制 + 命中判定（布局常量唯一来源）
 ├── plan/gba_hsp_plan.md
 ├── README.md
 └── third_party/gbarecomp-main/   # 生成器源码（.gitignore 忽略，不入库）
@@ -878,7 +948,7 @@ scons --board=sf32lb52-lchspi-ulp -j8
 **2-C 落地内容**：
 
 - `SConstruct`：全局 `CXXFLAGS += -std=c++20 -fexceptions -funwind-tables -fno-threadsafe-statics`（runtime 用 `throw` 退出 dispatch，SDK 默认 `-fno-exceptions`）。
-- `src/SConscript`：`gba_app` 组（`main.c`、`gba_device.cpp`、`gba_device_stubs.cpp`、`gba_psram.c`、生成的 `out/gen/gba_bios_blob.c`）+ `gba_runtime` 组（`src/gba/*.cpp`、`runtime_arm.cpp`、`symbol_lookup.cpp`、`runtime_bus_bridge.cpp`、`mod_function_hooks.cpp`、`out/bios/bios_recompiled.cpp`、`bios_dispatch_table.cpp`）。BIOS 二进制在 scons 阶段转成 C 数组，免去运行时文件系统。
+- `src/SConscript`：`gba_app` 组（`main.c`、`gba_device.cpp`、`gba_device_stubs.cpp`、`gba_psram.c`、`gba_cart_sd.c`、`gba_input.c`、`gba_pad.c`、生成的 `out/gen/gba_bios_blob.c`）+ `gba_runtime` 组（`src/gba/*.cpp`、`runtime_arm.cpp`、`symbol_lookup.cpp`、`runtime_bus_bridge.cpp`、`mod_function_hooks.cpp`、`out/bios/bios_recompiled.cpp`、`bios_dispatch_table.cpp`）。BIOS 二进制在 scons 阶段转成 C 数组，免去运行时文件系统。
 - `gba_psram.c`（新增）：`L2_NON_RET_BSS` 静态预留 4MB PSRAM arena，提供 bump 分配器 `gba_psram_alloc/free`（分配即清零，运行期不回收）。参考 InfoNES / PureDOOM 的 PSRAM 用法，把大块低频缓冲移出片上堆。
 - `gba_device.cpp`：PSRAM arena 上 placement new `GbaBus`/`GbaPpu`，装载 `roms/gba_bios.bin`（校验 SHA1），`set_active_bus/ppu`、`runtime_init`，复位 CPU 后 `for(;;) runtime_dispatch(g_cpu.R[15])`；BIOS 阶段用 `g_runtime_fn_entry_hook` 打「首次进入某 BIOS 函数」日志（SVC/IRQ 模式下 `runtime_should_yield` 不触发 present），PC 越过 `0x08000000` 视为 BIOS 引导结束。启动时额外打印片上堆与 PSRAM arena 的用量（`[gba] heap ...` / `[gba] psram ...`）。
 - `gba_device_stubs.cpp`：`overlay_try_dispatch` 恒 0、`runtime_dispatch_miss`/`runtime_unimplemented_op`/`runtime_force_interp_step`/`runtime_bridge_interpret` 打印后死循环、空 `kDispatchTable`、`armv4t::mul_wait_cycles`（照抄 `arm_ir.cpp`）、`gbarecomp::multiplayer_slice_safe` 恒 false。
@@ -971,31 +1041,32 @@ gbarecomp 的 PC 宿主层不能直接用：`runtime.cpp`（246KB）主循环里
 #define GBA_W       240
 #define GBA_H       160
 #define OFFSET_X    ((LCD_W - GBA_W) / 2)   // 75
-#define OFFSET_Y    ((LCD_H - GBA_H) / 2)   // 145
+#define OFFSET_Y    96                      // 居中为 145；下方 194 行要放手柄，窗口上移
 
-// 全局帧缓冲（GBA 分辨率，76.8KB）
-static L1_NON_RET_BSS_SECT(frambuf, ALIGN(64) uint8_t gba_fb[GBA_W * GBA_H * 2]);
+// 定稿实现（2026-11-17）：注册「窗口帧存」，每帧只推 76.8 KB，而不是整屏 351 KB
+L1_NON_RET_BSS_SECT(frambuf, ALIGN(64) static uint8_t g_gba_fb[GBA_W * GBA_H * 2]);   // 逐帧写
+L2_NON_RET_BSS_SECT(lcdfb, ALIGN(64) static uint8_t g_lcd_fb[LCD_W * LCD_H * 2]);     // 开机用一次
 
-// LCDC 句柄 + drv_lcd_fb_desc
-static lcd_fb_desc_t fb_desc = {
-    .area = {0, 0, LCD_W - 1, LCD_H - 1},
-    .p_data = ...,   // 390x450 屏幕帧缓冲（SDK 分配）
+static lcd_fb_desc_t g_gba_fb_desc = {
+    .area = {OFFSET_X, OFFSET_Y, OFFSET_X + GBA_W - 1, OFFSET_Y + GBA_H - 1},
+    .p_data = g_gba_fb,
     .format = RTGRAPHIC_PIXEL_FORMAT_RGB565,
-    .line_bytes = LCD_W * 2,
+    .line_bytes = GBA_W * 2,
 };
 
 void render_init(void) {
     drv_lcd_fb_init("lcd");
-    drv_lcd_fb_set(&fb_desc);
-    // 清屏为黑色
-    epic_fill(LCD_BLACK);
+    // 整屏铺机身色 + 画虚拟手柄（gba_pad_draw 内部整屏填充），与清屏共用一次 flush
+    gba_pad_draw((uint16_t*)g_lcd_fb, LCD_W, LCD_H, OFFSET_Y, OFFSET_Y + GBA_H - 1);
+    drv_lcd_fb_set(&g_panel_fb_desc);
+    drv_lcd_fb_write_send(&full_area, &full_area, g_lcd_fb, NULL, 1);
+    drv_lcd_fb_set(&g_gba_fb_desc);     // 之后每帧只刷窗口，机身/手柄不再重绘
 }
 
 void render_blit_gba(uint16_t* gba_pixels) {
-    // 居中区域 ROI
+    // 帧存地址与注册的 fb 相同 ⇒ 驱动跳过拷贝，直接送窗口
     LCD_AreaDef roi = {OFFSET_X, OFFSET_Y, OFFSET_X + GBA_W - 1, OFFSET_Y + GBA_H - 1};
-    // 从 GBA 帧缓冲复制到屏幕帧缓冲的居中位置
-    drv_lcd_fb_write_send(&roi, &roi, (uint8_t*)gba_pixels, NULL, 1);
+    drv_lcd_fb_write_send(&roi, &roi, (uint8_t*)g_gba_fb, NULL, 1);
 }
 ```
 
@@ -1038,11 +1109,12 @@ void gba_frame_wait(uint32_t start_cycles) {
 | # | 验证点 | 通过标准 | 状态 |
 |---|--------|---------|------|
 | 2.1 | LCD 屏幕点亮 | 全黑背景 390×450 | ✅ 通过 |
-| 2.2 | 居中区域可写 | 中央 240×160 显示测试色块 | ✅ 通过（2026-11-11 复烧确认居中 240×160 白块） |
+| 2.2 | 窗口区域可写 | 240×160 窗口显示测试色块 | ✅ 通过（2026-11-11 复烧确认居中 240×160 白块；Phase 3.1 起窗口上移到 y=96） |
 | 2.3 | CPU 跑通 BIOS | 串口打印 BIOS 初始化日志 | ✅ 通过（236 个函数入口后进入空闲循环） |
-| 2.4 | PPU 软渲染输出 | GBA 画面正确显示在居中区域 | ✅ 通过（无卡时 forced blank 的 240×160 白块正好居中；待挂 ROM 后看真实画面） |
-| 2.5 | 颜色格式正确 | BGR555 → RGB565 颜色无偏差 | ⏳ 未开始 |
-| 2.6 | 跑通游戏标题画面 | Mario Kart Super Circuit 标题显示 | ⏳ 未开始 |
+| 2.4 | PPU 软渲染输出 | GBA 画面正确显示在窗口区域 | ✅ 通过（无卡时 forced blank 的 240×160 白块；挂 ROM 后为真实游戏画面） |
+| 2.5 | 颜色格式正确 | BGR555 → RGB565 颜色无偏差 | ✅ 通过（Mario Kart 画面颜色正常，2026-11-13 起多轮真机确认） |
+| 2.6 | 跑通游戏标题画面 | Mario Kart Super Circuit 标题显示 | ✅ 通过（2026-11-13 12:12 出画面；11-17 已能进选人 → 比赛） |
+| 2.7 | 能操作游戏 | 触摸虚拟手柄驱动角色 | ✅ 通过（2026-11-17 16:29 Start/A/十字键，见 §0.10） |
 
 #### 3.2.4 Phase 2-E 容量优化候选（暂不实施，待 2-D 真机跑通真实 ROM 后再定）
 
@@ -1065,7 +1137,11 @@ E1 + E2 合计可把 15.585 MiB 压到 **约 12 MiB**，为 6 MiB 级 ROM 腾出
 > （地址空间 `0x08000000`/`0x02000000`/`0x03000000` 无法重映射、寄存器模型、PC+8 vs PC+4、SWI/IRQ vs SVC/NVIC），
 > 其中地址重映射需要 MMU，而 Cortex-M33 的 MPU 只能改权限、不能改地址——硬性否决。
 
-### Phase 3：音频 + 输入 + 保存（3-4 天）
+### Phase 3：音频 + 输入 + 保存
+
+> **范围决策（2026-11-17）**：先做输入，**已完成**（见 §3.3.3 与 §0.10）。音频（§3.3.1 / §3.3.2）
+> 与存档（§3.3.4）明确**暂不做**——依据「性能不达标，音频和存档没有意义」。
+> 下面 3.3.1 / 3.3.2 / 3.3.4 保留为设计草案，未实施。
 
 #### 3.3.1 音频后端
 
@@ -1127,54 +1203,32 @@ static int16_t psg_square_step(gba_psg_t* ch) {
 }
 ```
 
-#### 3.3.3 按键输入
+#### 3.3.3 按键输入（已完成：屏幕虚拟手柄 + 触摸）
 
-```c
-// input_backend.c
-// KEY1 = PA34, KEY2 = PA43
-// board.conf 中已配置 CONFIG_BSP_USING_KEY1/KEY2=y
+原先设想的「KEY1/KEY2 短按 + 长按凑出 A/B/Start/Select」已放弃——那样做不出十字键和 L/R。
+最终方案是把整个面板当成手柄：GBA 窗口上移，上下留出的两条带子上画出十字键、AB、Select/Start、L/R，
+触摸命中后写 guest 的 `KEYINPUT` 寄存器。几何与日志证据见 §0.10。
 
-#include "drv_gpio.h"
+| 文件 | 职责 |
+|------|------|
+| `src/gba_pad.c` | 布局常量 + 绘制（整屏紫机身、灰按键，纯 rect/circle/capsule 填充）+ `gba_pad_hit()` |
+| `src/gba_pad.h` | 只暴露 `gba_pad_draw()` / `gba_pad_hit()` |
+| `src/gba_input.c` | 输入线程：10 ms 轮询 `"touch"` 设备的环形缓冲，UP 清 0、DOWN/MOVE 重新命中，掩码变化才写寄存器 |
+| `src/gba_device.cpp` | `gba_device_set_keyinput()` → `g_bus->io().set_keyinput()`；bus 未建时丢弃掩码 |
+| `src/main.c` | 开机绘制手柄并与清屏共用一次整屏 flush，之后只刷 240×160 窗口 |
 
-#define KEY1_PIN 34
-#define KEY2_PIN 43
+**KEYINPUT 口径**：低 10 位有效、**低电平为按下**（bit0 A、1 B、2 Select、3 Start、4 Right、
+5 Left、6 Up、7 Down、8 R、9 L）。`gba_pad_hit()` 返回「按下」掩码，`gba_input.c` 写成
+`(~pressed) & 0x03FF`；`GbaIo::set_keyinput()` 自身再掩 `0x03FF` 并与 `synth_keyinput_`
+（初值 0x03FF）按位与，所以未触摸时寄存器保持全松开。
 
-// 长按 KEY2 = Start, 短按 = A
-// KEY1 = B, 长按 KEY1 = Select
-// 还缺 D-pad/L/R — 先用默认值（未按下）
+**实测约束**：
 
-#define GBA_KEY_A      (1 << 0)
-#define GBA_KEY_B      (1 << 1)
-#define GBA_KEY_SELECT (1 << 2)
-#define GBA_KEY_START  (1 << 3)
-// D-pad/L/R 未映射，暂时返回 0
-
-static uint32_t key_press_ticks[2] = {0};
-
-uint16_t input_read_keypad(void) {
-    uint16_t keypad = 0;
-    int key1 = gpio_read(KEY1_PIN);
-    int key2 = gpio_read(KEY2_PIN);
-
-    if (!key2) {
-        key_press_ticks[1]++;
-        if (key_press_ticks[1] < 300)       keypad |= GBA_KEY_A;
-        if (key_press_ticks[1] > 300)       keypad |= GBA_KEY_START;
-    } else {
-        key_press_ticks[1] = 0;
-    }
-
-    if (!key1) {
-        key_press_ticks[0]++;
-        if (key_press_ticks[0] < 300)       keypad |= GBA_KEY_B;
-        if (key_press_ticks[0] > 300)       keypad |= GBA_KEY_SELECT;
-    } else {
-        key_press_ticks[0] = 0;
-    }
-
-    return keypad;
-}
-```
+- FT6146 滑动时重复上报 `DOWN`（`ev=2`）而不是 `MOVE`（`ev=3`），所以 DOWN/MOVE 必须走同一分支。
+- 板上实体键 KEY1（PA34）/ KEY2（PA43）为 active-high，目前只打印电平，**未映射**到 GBA 按键；
+  可选方案：KEY1 → Start、KEY2 → Select，作为触摸失灵时的备份。
+- 按下高亮未做：`drv_lcd_fb` 只有 2 个 fb 槽位且双缓冲轮转，不能同时表示「机身」和「高亮键」，
+  需要「面板级 fb + 局部 dirty rect」方案（只重传被按下/松开的那一小块）。
 
 #### 3.3.4 保存功能
 
@@ -1190,27 +1244,29 @@ uint16_t input_read_keypad(void) {
 
 #### 3.3.5 Phase 3 验证清单
 
-| # | 验证点 |
-|---|--------|
-| 3.1 | DAC 输出正弦波 → 听到声音 |
-| 3.2 | GBA PCM DMA → 游戏音效正常 |
-| 3.3 | PSG 4 通道合成 → 背景音乐可听 |
-| 3.4 | KEY1/KEY2 响应 → 能控制游戏 |
-| 3.5 | 长按检测 → Start/Select 映射正确 |
-| 3.6 | 保存/加载 → 存档成功 |
-| 3.7 | 完整游戏流程: 标题 → 对话 → 菜单 → 存档 → 重启 |
+| # | 验证点 | 状态 |
+|---|--------|------|
+| 3.1 | DAC 输出正弦波 → 听到声音 | 🚫 暂不做 |
+| 3.2 | GBA PCM DMA → 游戏音效正常 | 🚫 暂不做 |
+| 3.3 | PSG 4 通道合成 → 背景音乐可听 | 🚫 暂不做 |
+| 3.4 | 触摸虚拟手柄 → 能控制游戏 | ✅ Start / A / 十字键已验（2026-11-17 16:29）；B / Select / L / R 待验 |
+| 3.5 | Start/Select 映射正确 | ✅ 独立圆键（(178,329) / (178,377)），不再需要长按检测；Start 已验证 |
+| 3.6 | 保存/加载 → 存档成功 | 🚫 暂不做 |
+| 3.7 | 完整游戏流程: 标题 → 对话 → 菜单 → 存档 → 重启 | ⏳ 部分（标题 → 选人 → 比赛已可走；存档不在范围） |
 
 ### Phase 4：完善与优化（持续）
 
-**性能目标**: CPU 占用 < 80%，音频延迟 < 50ms，帧率稳定 60fps
+**性能目标**：分阶段 **7 → 10 fps**（2026-11-17 实测结论：60 fps 在 240 MHz M33 上不可达，
+天花板 ≈11.8 fps，见 §0.7；当前开场/菜单 6.2–7.5 / 赛道 3.3–5.9 fps）。
+音频延迟、存档兼容性暂不作为目标（Phase 3 范围已裁剪）。
 
-**优化方向**:
-1. **Tile 预解码** — PPU 模拟时，背景 Tile (8×8 索引色) 预生成位图 → 渲染快 2-3x
-2. **帧缓冲优化** — 让 LCDC 直接用 GBA 帧缓冲作为 Layer data，省去 blit
-3. **Cortex-M33 DSP 扩展** — 音频混合用 SIMD → 快 5-10x
-4. **中断优先级** — 音频 DMA > LCDC > Timer > 其他 → 减少抖动
-5. **RTOS 调度** — 把渲染/音频/游戏循环分到不同线程
-6. **ePicasso GPU 辅助** — 用 Epic 引擎做 Tile 解码加速
+**优化方向**（按 §0.9 / §0.8 的实测重新排序，A→C 为当前首选）：
+1. **BG 提交路径**：免写 `second[]`（A）→ out 阶段批量化（B）→ 拆 `disp` 的寄存器分配（C，Phase 2-E1）
+2. **帧缓冲优化** — 已落地：LCDC 直接读 GBA 窗口帧存，无 blit（只 76.8 KB/帧，convert 165 ms + flush 22 ms per 60f）
+3. **Tile 预解码** — 仅对 `fetch` 有效，而 fetch 只占 0.34 cyc/px；真正的成本在逐像素 `dec` 与 `sub`，先不做
+4. **中断优先级** — LCDC 送屏与 Timer 的关系待测；音频不在范围
+5. **RTOS 调度** — 当前 GUI 与仿真在同一线程串行（`wall` ≈ `disp` + `halt`），拆线程/异步送屏收益未验证
+6. **EPIC（ePicasso）辅助** — 只有 out 格式转换与 OBJ 仿射能受益（无 CLUT / 无 tilemap），救不了 BG 解码主体，见 §0.8
 
 **ROM 大小处理**:
 - ≤ 8MB → 放 NOR Flash + PSRAM 运行
@@ -1231,12 +1287,13 @@ uint16_t input_read_keypad(void) {
 
 | 风险 | 概率 | 影响 | 处理 |
 |------|------|------|------|
-| **【已解决】重编译代码体积 ≈ ROM 的 4 倍** | 已发生 | 高 | 原始 16.98MB 装不下；用 `GBARECOMP_SLIM` 去掉每指令 yield/trace 检查后降到 **12.68MB**，加 BIOS/runtime 约 13.6MB，NOR 余量约 2MB |
-| gbarecomp C 代码在 Cortex-M33 效率不够 | 中 | 高 | 先测实际 CPU 占用；必要时改用 rt-thread 线程调度 / 降低帧率 |
-| PPU 软渲染帧率不够 60fps | 中 | 高 | Tile 预解码 → DSP SIMD → ePicasso GPU |
-| 游戏 ROM > 8MB 放 NOR 装不下 | 低 | 中 | 自动切 TF 卡方案 |
+| **【已解决】重编译代码体积 ≈ ROM 的 4 倍** | 已发生 | 高 | 原始 16.98MB 装不下；`GBARECOMP_SLIM` 去掉每指令 yield/trace 检查后降到 **12.68MB**，加 BIOS/runtime 与 Phase 3.1 手柄代码后当前固件 **16.37MB**，ROM 分区 16.61MB，余 **353KB** |
+| gbarecomp C 代码在 Cortex-M33 上效率不够 | 已发生 | 高 | 实测开场/菜单 6.2–7.5、赛道 3.3–5.9 fps；目标改为 7→10 fps，按 §0.9 的 A/B/C 推进 |
+| **【已定论】PPU 软渲染到不了 60 fps** | 已发生 | 中 | 天花板 ≈11.8 fps（§0.7）。Tile 预解码只优化 fetch（0.34 cyc/px），不能解决问题；改做逐像素 `dec`/`sub` 与 out 批量化 |
+| 游戏 ROM > 8MB 放 NOR 装不下 | 低 | 中 | 自动切 TF 卡方案（当前 4MB ROM 走 TF 卡 `/gba.gba` 读入 PSRAM） |
 | gbarecomp 对目标 ROM 覆盖率不足（fallback 太多） | 中 | 中 | 先用 P0/P1 游戏；manifest 反馈补全 |
-| 颜色格式 BGR555 vs RGB565 色偏 | 低 | 低 | blit 时加格式转换 |
+| 颜色格式 BGR555 vs RGB565 色偏 | 已发生 | 低 | **已解决**：`present_frame()` 里 RGB888 → RGB565，多轮真机确认颜色正常 |
+| 触摸手柄与绘制错位 / 手感偏差 | 已发生 | 低 | 命中判定复用 `gba_pad_draw()` 记录的 band 原点与 ready 标志；十字键留 ±19 死区 + 方形框便于搓对角（§0.10） |
 
 ---
 
@@ -1247,7 +1304,7 @@ uint16_t input_read_keypad(void) {
 |------|------|
 | SDK 根 | `e:\work\gitee\sifli\SiFli-SDK\v2.5.1\` |
 | 环境脚本 | `set_env.bat` |
-| 构建命令 | `scons --board=sf32lb52-lchspi-ulp -j8` |
+| 构建命令 | `scons --board=sf32lb52-lchspi-ulp -j4`。本机必须先设 `ENV_ROOT=D:\sifli\env`（否则 `scons.exe` 报 `Failed to import encodings module`），且不能省 `--board`（否则 `rtconfig has no attribute 'CHIP'`） |
 | Board 配置 | `customer/boards/sf32lb52-lchspi-ulp/hcpu/board.conf` |
 | RT-Thread | `rtos/` |
 | HAL 驱动头 | `drivers/Include/bf0_hal_*.h` |

@@ -526,3 +526,15 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
                g_cpu.R[15], g_bios_entries, g_frames);
     rt_kprintf("[gba] halted (no cartridge mapped)\n");
 }
+
+// src/gba_input.c: push a button mask into the guest KEYINPUT register. The
+// register is active-low, so the caller passes the complement of what is held.
+// Safe to call before gba_device_run() has built the bus: the mask is simply
+// dropped, and the next touch report after boot sets it again.
+extern "C" void gba_device_set_keyinput(rt_uint16_t keys)
+{
+    if (g_bus != nullptr)
+    {
+        g_bus->io().set_keyinput((uint16_t)keys);
+    }
+}
