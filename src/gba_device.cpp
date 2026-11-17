@@ -363,8 +363,6 @@ bool present_frame(void)
 
     if ((++g_frames % 60u) == 0u)
     {
-        rt_kprintf("[gba] frame %u pc=%08x vblank=%u\n",
-                   (unsigned int)g_frames, g_cpu.R[15], vbl);
         perf_report();
     }
     return false;
