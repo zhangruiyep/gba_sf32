@@ -62,7 +62,7 @@ else:
 #   PPU_DEFER_RGB        expand scanline colors to RGB888 once, at output
 #   PPU_LAZY_HUD_CLEAR   skip the unused foreign HUD row clear
 #   FRAME_SKIP           rasterize only every other guest frame
-#   PERF_PROBES          DWT frame-time probes (perf/perf2/perf3/lcd/mem bench)
+#   PERF_PROBES          DWT frame-time probes (perf/memrd/memwr/lcd/mem bench)
 runtime_features = [
     'GBARECOMP_COMPACT_FRAMEBUFFER',
     'GBARECOMP_NO_HOST_SAMPLER',

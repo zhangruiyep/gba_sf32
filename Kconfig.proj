@@ -150,10 +150,10 @@ config GBARECOMP_PERF_PROBES
     bool "Enable the DWT frame-time probes"
     default y
     help
-      The temporary [gba] perf/perf2/perf3/lcd/mem-bench instrumentation
-      used to locate the frame-rate bottleneck: DWT cycle buckets in
-      gba_device.cpp, main.c and runtime_bus_bridge.cpp, plus the
-      render-phase split in gba_ppu.cpp. Turn this off to build without
-      the probes.
+      The [gba] perf/memrd/memwr/lcd/mem-bench instrumentation used to
+      locate the frame-rate bottleneck: the frame counters in
+      gba_device.cpp, the lcd timing in main.c, and the guest load/store
+      split in runtime_bus_bridge.cpp. Turn this off to build without the
+      probes.
 
 endmenu

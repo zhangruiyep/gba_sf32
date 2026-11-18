@@ -92,30 +92,12 @@ uint32_t g_present_count = 0;
 uint32_t g_report_tick = 0;
 uint32_t g_report_cycle = 0;
 
-// Device-phase buckets filled by runtime_bus_bridge.cpp's tick_devices().
-// Temporary: delete together with its `[gba] perf2` print line.
+// Guest load/store split filled by runtime_bus_bridge.cpp's bus_read_* and
+// bus_write_* entries: [0] reads, [1] writes x 9 regions.
 #if defined(GBARECOMP_PERF_PROBES)
 extern "C" {
-extern unsigned g_dev_prof_cyc[8];
-extern unsigned g_dev_prof_renders;
-extern unsigned g_dev_prof_loops;
-extern unsigned g_ppu_phase_cyc[5];
-extern unsigned g_ppu_bg_layer_rows;
-extern unsigned g_ppu_bg_runs;
-extern unsigned g_ppu_bg_px;
-extern unsigned g_ppu_bg_subm;
-extern unsigned g_ppu_bg_fetch_cyc;
-extern unsigned g_ppu_bg_pix_cyc;
-extern unsigned g_ppu_bg_fast_px;
-extern unsigned g_ppu_bg_fast_subm;
-extern unsigned g_ppu_bg_pix_win;
-extern unsigned g_ppu_bg_pix_zero;
-extern unsigned g_ppu_bg_dec_cyc;
-extern unsigned g_ppu_bg_sub_cyc;
-extern unsigned g_ppu_bg_zero_run_runs;
-extern unsigned g_ppu_bg_zero_run_px;
-extern unsigned g_ppu_bg_skip_runs;
-extern unsigned g_ppu_bg_skip_px;
+extern unsigned g_mem_prof_cnt[2][9];
+extern unsigned g_mem_prof_cyc[2][9];
 }
 #endif
 
@@ -136,97 +118,60 @@ void perf_report(void)
                (unsigned int)to_ms(g_halt_cycles), (unsigned int)g_halt_pumps,
                (unsigned int)to_ms(g_present_cycles), (unsigned int)g_present_count);
 
-    // Device-pump split. `render` is the scanline compositor; `qry` the
-    // event-distance queries; anything left between `halt` above and their sum
-    // is runtime_tick()/tick_devices bookkeeping plus DMA steal and IRQ entry.
-    // Split over two lines: the console truncates a single print at ~160
-    // characters, which used to cut off the `loops` field.
-    const uint32_t rend_cyc = g_dev_prof_cyc[4];
-    rt_kprintf("[gba] perf2 60f: render %u ms %u ln (%u cyc/ln) | ppu %u | audio %u | tim %u | sio %u\n",
-               (unsigned int)to_ms(rend_cyc), (unsigned int)g_dev_prof_renders,
-               (unsigned int)(g_dev_prof_renders != 0u
-                                  ? rend_cyc / g_dev_prof_renders : 0u),
-               (unsigned int)to_ms(g_dev_prof_cyc[3]),
-               (unsigned int)to_ms(g_dev_prof_cyc[0]),
-               (unsigned int)to_ms(g_dev_prof_cyc[1]),
-               (unsigned int)to_ms(g_dev_prof_cyc[2]));
-    rt_kprintf("[gba] perf2b 60f: hdma %u | vbl %u | qry %u | loops %u\n",
-               (unsigned int)to_ms(g_dev_prof_cyc[5]),
-               (unsigned int)to_ms(g_dev_prof_cyc[6]),
-               (unsigned int)to_ms(g_dev_prof_cyc[7]),
-               (unsigned int)g_dev_prof_loops);
-
-    // Scanline phase split (see g_ppu_phase_cyc in gba_ppu.cpp): prep / BG /
-    // foreign / OBJ / output. Temporary like the counters above.
-    rt_kprintf("[gba] perf3 60f: prep %u | bg %u | fgn %u | obj %u | out %u ms\n",
-               (unsigned int)to_ms(g_ppu_phase_cyc[0]),
-               (unsigned int)to_ms(g_ppu_phase_cyc[1]),
-               (unsigned int)to_ms(g_ppu_phase_cyc[2]),
-               (unsigned int)to_ms(g_ppu_phase_cyc[3]),
-               (unsigned int)to_ms(g_ppu_phase_cyc[4]));
-    const uint32_t bg_phase_cyc = g_ppu_phase_cyc[1];
-    for (unsigned int i = 0; i < 5u; ++i)
+    // Guest load/store split (see g_mem_prof_* in runtime_bus_bridge.cpp):
+    // host ms / access count per GBA region. These buckets cover only the time
+    // inside bus_read_*/bus_write_*; the rest of `disp` is AOT instruction
+    // work, runtime_tick and IRQ entry. The final line divides the bucket
+    // cycles by the access count, so the average cost of a guest access
+    // (including the probe's own ~10 cycles) sits next to the 14 / 71 cyc
+    // random-read figures from `mem bench` above.
     {
-        g_ppu_phase_cyc[i] = 0;
+        uint32_t rd_cyc = 0;
+        uint32_t wr_cyc = 0;
+        uint32_t rd_cnt = 0;
+        uint32_t wr_cnt = 0;
+        for (unsigned int i = 0; i < 9u; ++i)
+        {
+            rd_cyc += g_mem_prof_cyc[0][i];
+            rd_cnt += g_mem_prof_cnt[0][i];
+            wr_cyc += g_mem_prof_cyc[1][i];
+            wr_cnt += g_mem_prof_cnt[1][i];
+        }
+        rt_kprintf("[gba] memrd 60f: EWRAM %u/%u IWRAM %u/%u ROM %u/%u IO %u/%u\n",
+                   (unsigned int)g_mem_prof_cnt[0][1], (unsigned int)to_ms(g_mem_prof_cyc[0][1]),
+                   (unsigned int)g_mem_prof_cnt[0][2], (unsigned int)to_ms(g_mem_prof_cyc[0][2]),
+                   (unsigned int)g_mem_prof_cnt[0][7], (unsigned int)to_ms(g_mem_prof_cyc[0][7]),
+                   (unsigned int)g_mem_prof_cnt[0][3], (unsigned int)to_ms(g_mem_prof_cyc[0][3]));
+        rt_kprintf("[gba] memrd2 60f: PAL %u/%u VRAM %u/%u OAM %u/%u BIOS %u/%u OTH %u/%u\n",
+                   (unsigned int)g_mem_prof_cnt[0][4], (unsigned int)to_ms(g_mem_prof_cyc[0][4]),
+                   (unsigned int)g_mem_prof_cnt[0][5], (unsigned int)to_ms(g_mem_prof_cyc[0][5]),
+                   (unsigned int)g_mem_prof_cnt[0][6], (unsigned int)to_ms(g_mem_prof_cyc[0][6]),
+                   (unsigned int)g_mem_prof_cnt[0][0], (unsigned int)to_ms(g_mem_prof_cyc[0][0]),
+                   (unsigned int)g_mem_prof_cnt[0][8], (unsigned int)to_ms(g_mem_prof_cyc[0][8]));
+        rt_kprintf("[gba] memwr 60f: EWRAM %u/%u IWRAM %u/%u IO %u/%u VRAM %u/%u\n",
+                   (unsigned int)g_mem_prof_cnt[1][1], (unsigned int)to_ms(g_mem_prof_cyc[1][1]),
+                   (unsigned int)g_mem_prof_cnt[1][2], (unsigned int)to_ms(g_mem_prof_cyc[1][2]),
+                   (unsigned int)g_mem_prof_cnt[1][3], (unsigned int)to_ms(g_mem_prof_cyc[1][3]),
+                   (unsigned int)g_mem_prof_cnt[1][5], (unsigned int)to_ms(g_mem_prof_cyc[1][5]));
+        rt_kprintf("[gba] memwr2 60f: PAL %u/%u OAM %u/%u BIOS %u/%u ROM %u/%u OTH %u/%u\n",
+                   (unsigned int)g_mem_prof_cnt[1][4], (unsigned int)to_ms(g_mem_prof_cyc[1][4]),
+                   (unsigned int)g_mem_prof_cnt[1][6], (unsigned int)to_ms(g_mem_prof_cyc[1][6]),
+                   (unsigned int)g_mem_prof_cnt[1][0], (unsigned int)to_ms(g_mem_prof_cyc[1][0]),
+                   (unsigned int)g_mem_prof_cnt[1][7], (unsigned int)to_ms(g_mem_prof_cyc[1][7]),
+                   (unsigned int)g_mem_prof_cnt[1][8], (unsigned int)to_ms(g_mem_prof_cyc[1][8]));
+        rt_kprintf("[gba] memtot 60f: read %u ms %u calls (%u cyc) | write %u ms %u calls (%u cyc)\n",
+                   (unsigned int)to_ms(rd_cyc), (unsigned int)rd_cnt,
+                   (unsigned int)(rd_cnt != 0u ? rd_cyc / rd_cnt : 0u),
+                   (unsigned int)to_ms(wr_cyc), (unsigned int)wr_cnt,
+                   (unsigned int)(wr_cnt != 0u ? wr_cyc / wr_cnt : 0u));
+        for (unsigned int i = 0; i < 9u; ++i)
+        {
+            g_mem_prof_cnt[0][i] = 0;
+            g_mem_prof_cyc[0][i] = 0;
+            g_mem_prof_cnt[1][i] = 0;
+            g_mem_prof_cyc[1][i] = 0;
+        }
     }
-
-    // Text-BG work counters (see g_ppu_bg_* in gba_ppu.cpp): divides the `bg`
-    // bucket by actual work so an unexpectedly high cycles/pixel shows up as a
-    // per-unit cost rather than a guess. Kept short enough for the ~128-column
-    // console, so the derived ratios are left to the log reader.
-    {
-        const uint32_t bg_cyc = bg_phase_cyc;
-        rt_kprintf("[gba] perf4 60f: rows %u runs %u px %u subm %u | bg %u fetch %u pix %u cyc\n",
-                   (unsigned int)g_ppu_bg_layer_rows,
-                   (unsigned int)g_ppu_bg_runs,
-                   (unsigned int)g_ppu_bg_px,
-                   (unsigned int)g_ppu_bg_subm,
-                   (unsigned int)bg_cyc,
-                   (unsigned int)g_ppu_bg_fetch_cyc,
-                   (unsigned int)g_ppu_bg_pix_cyc);
-        g_ppu_bg_layer_rows = 0;
-        g_ppu_bg_runs = 0;
-        g_ppu_bg_px = 0;
-        g_ppu_bg_subm = 0;
-        g_ppu_bg_fetch_cyc = 0;
-        g_ppu_bg_pix_cyc = 0;
-    }
-
-    // Coverage of the 4bpp/no-window fast path in the BG run loop (see
-    // g_ppu_bg_fast_px in gba_ppu.cpp). Compare against `px`/`subm` in perf4:
-    // if the fast path covers most pixels, the per-pixel work is what it is;
-    // if it does not, the generic (windowed / 256-color) loop is the hot one.
-    rt_kprintf("[gba] bgfast 60f: px %u subm %u\n",
-               (unsigned int)g_ppu_bg_fast_px,
-               (unsigned int)g_ppu_bg_fast_subm);
-    g_ppu_bg_fast_px = 0;
-    g_ppu_bg_fast_subm = 0;
-
-    // Per-pixel split of the BG decode loop (see g_ppu_bg_dec_cyc in
-    // gba_ppu.cpp): win/zero are the rejection exits, dec/sub the cycles spent
-    // before and after the palette fetch + submit decision.
-    rt_kprintf("[gba] bgpix 60f: win %u zero %u | dec %u sub %u cyc\n",
-               (unsigned int)g_ppu_bg_pix_win,
-               (unsigned int)g_ppu_bg_pix_zero,
-               (unsigned int)g_ppu_bg_dec_cyc,
-               (unsigned int)g_ppu_bg_sub_cyc);
-    g_ppu_bg_pix_win = 0;
-    g_ppu_bg_pix_zero = 0;
-    g_ppu_bg_dec_cyc = 0;
-    g_ppu_bg_sub_cyc = 0;
-
-    // Fully transparent 4bpp runs skipped as a unit (BG_ZERO_RUN); `px` is a
-    // subset of the zero-pixel count on the line above. bgskip counts runs
-    // dropped because a nearer candidate already covered every pixel.
-    rt_kprintf("[gba] bgzero 60f: runs %u px %u | bgskip %u %u\n",
-               (unsigned int)g_ppu_bg_zero_run_runs,
-               (unsigned int)g_ppu_bg_zero_run_px,
-               (unsigned int)g_ppu_bg_skip_runs,
-               (unsigned int)g_ppu_bg_skip_px);
-    g_ppu_bg_zero_run_runs = 0;
-    g_ppu_bg_zero_run_px = 0;
-    g_ppu_bg_skip_runs = 0;
-    g_ppu_bg_skip_px = 0;
 
     g_report_tick = rt_tick_get();
     g_report_cycle = perf_now();
@@ -236,12 +181,6 @@ void perf_report(void)
     g_halt_pumps = 0;
     g_present_cycles = 0;
     g_present_count = 0;
-    for (unsigned int i = 0; i < 8u; ++i)
-    {
-        g_dev_prof_cyc[i] = 0;
-    }
-    g_dev_prof_renders = 0;
-    g_dev_prof_loops = 0;
 #endif
 }
 
