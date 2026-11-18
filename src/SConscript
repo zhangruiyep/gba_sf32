@@ -61,6 +61,7 @@ else:
 #   PPU_ROW_WINDOW_CACHE resolve PPU window masks once per scanline
 #   PPU_DEFER_RGB        expand scanline colors to RGB888 once, at output
 #   PPU_LAZY_HUD_CLEAR   skip the unused foreign HUD row clear
+#   FRAME_SKIP           rasterize only every other guest frame
 #   PERF_PROBES          DWT frame-time probes (perf/perf2/perf3/lcd/mem bench)
 runtime_features = [
     'GBARECOMP_COMPACT_FRAMEBUFFER',
@@ -77,6 +78,7 @@ runtime_features = [
     'GBARECOMP_PPU_ROW_WINDOW_CACHE',
     'GBARECOMP_PPU_DEFER_RGB',
     'GBARECOMP_PPU_LAZY_HUD_CLEAR',
+    'GBARECOMP_FRAME_SKIP',
     'GBARECOMP_PERF_PROBES',
 ]
 

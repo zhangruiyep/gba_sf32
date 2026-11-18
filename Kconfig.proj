@@ -131,6 +131,21 @@ config GBARECOMP_PPU_LAZY_HUD_CLEAR
       foreign background is published. Disabling clears it on every
       scanline, as upstream does.
 
+config GBARECOMP_FRAME_SKIP
+    bool "Render every other guest frame; present the last complete image"
+    default n
+    help
+      Alternate guest frames skip the scanline compositor, keeping the
+      previous complete image on screen. Guest timing, IRQ, DMA and the
+      PPU's hidden affine reference accumulators still advance on every
+      frame because render_scanline() is still called for each line; only
+      the compositor body and the latched-framebuffer copy are dropped.
+      The PPU owns the decision (GbaPpu::set_frame_skip(), frame_phase_
+      advanced at frame end in tick()); src/gba_device.cpp still presents
+      every VBlank so a skipped frame simply repeats the last image.
+      Measured on Mario Kart: render 3.46 s -> 1.7-2.1 s per 60 guest
+      frames, ~7.2 -> 8.7-10.0 fps, panel at half the guest frame rate.
+
 config GBARECOMP_PERF_PROBES
     bool "Enable the DWT frame-time probes"
     default y

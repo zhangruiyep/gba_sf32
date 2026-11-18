@@ -292,6 +292,18 @@ uint32_t g_frames = 0;
 bool     g_cart_entered = false;
 unsigned int g_presented_vblank = 0;
 
+// Frame skip (Kconfig GBARECOMP_FRAME_SKIP): let the PPU rasterize only every
+// kRenderEvery guest frame. Skipped frames still advance guest time, IRQs, DMA
+// and the PPU's hidden affine accumulators - render_scanline() still runs for
+// every visible line, only the compositor body is dropped. The PPU keys the
+// decision off its own frame counter; the vblank callback does not fire once
+// per frame, so it must not own the toggle.
+#if defined(GBARECOMP_FRAME_SKIP)
+constexpr unsigned int kRenderEvery = 2u;
+#else
+constexpr unsigned int kRenderEvery = 1u;
+#endif
+
 void run_static_initializers(void)
 {
     for (void (**fn)(void) = __init_array_start; fn < __init_array_end; ++fn)
@@ -391,14 +403,22 @@ bool present_frame(void)
         return false;
     }
     g_presented_vblank = vbl;
+    ++g_frames;
 
+    // Present every VBlank. A skipped frame keeps the last complete image in
+    // latched_fb_, so the panel just repeats it; gating presentation on a vblank
+    // parity made the panel hold a stale update and flash black/white during the
+    // boot-to-menu transition.
     const uint32_t present_start = perf_now();
     gba_lcd_present(g_ppu->latched_framebuffer(),
                     g_ppu->render_width(), g_ppu->render_height());
     g_present_cycles += perf_now() - present_start;
     ++g_present_count;
 
-    if ((++g_frames % 60u) == 0u)
+    // Report every 60 guest frames rather than every 60 presents: with skip
+    // enabled those differ, and the wall clock would otherwise cover twice the
+    // guest time. `pres` in the perf line still shows the panel update count.
+    if ((vbl % 60u) == 0u)
     {
         perf_report();
     }
@@ -420,6 +440,7 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
 
     g_bus = new (reinterpret_cast<void *>(base)) gba::GbaBus();
     g_ppu = new (reinterpret_cast<void *>(base + sizeof(gba::GbaBus))) gba::GbaPpu();
+    g_ppu->set_frame_skip(kRenderEvery);
     run_static_initializers();
 
     std::string err;
@@ -473,6 +494,10 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     }
 #endif
 
+#if defined(GBARECOMP_FRAME_SKIP)
+    rt_kprintf("[gba] frame skip: render every %u. guest frame\n",
+               (unsigned int)kRenderEvery);
+#endif
     rt_kprintf("[gba] BIOS loaded, booting from reset vector %08x\n", g_cpu.R[15]);
 
     for (;;)

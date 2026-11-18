@@ -144,7 +144,7 @@ index 72ca9ec..da73969 100644
      ShadowVerifier vf_{};
      uint8_t  count_mode_ = 0;
 diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
-index d9d1604..6218b4d 100644
+index d9d1604..d02df73 100644
 --- a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
 +++ b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
 @@ -28,6 +28,90 @@ static uint64_t ordered_wide_text_span_test_jobs = 0;
@@ -238,7 +238,15 @@ index d9d1604..6218b4d 100644
  // Widescreen margin tilemap provider (Step C). When set (by the runtime-side
  // sidecar) and the wide path samples a margin column (hardware x outside
  // 0..239), the BG text-tilemap entry is sourced from this hook (the true
-@@ -721,6 +805,41 @@ void mark_obj_window_scanline(bool* mask,
+@@ -277,6 +361,7 @@ GbaPpu::TickEvents GbaPpu::tick(uint32_t cycles, uint16_t vcount_compare) {
+             if (scanline_ >= kLinesTotal) {
+                 scanline_ = 0;
+                 ++frame_count_;
++                if (++frame_phase_ >= frame_skip_) frame_phase_ = 0;
+                 ev.frame_completed = true;
+             }
+             vcount_ = static_cast<uint16_t>(scanline_);
+@@ -721,6 +806,41 @@ void mark_obj_window_scanline(bool* mask,
      }
  }
  
@@ -280,7 +288,7 @@ index d9d1604..6218b4d 100644
  template<bool Ordered, bool HardwareOnly = false>
  void render_scanline_impl(uint8_t* rgb,
                                uint32_t y,
-@@ -732,6 +851,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -732,6 +852,7 @@ void render_scanline_impl(uint8_t* rgb,
                                uint32_t kScreenWidth,
                                uint32_t kScreenHeight) {
      GBA_RENDER_PHASE_BEGIN(profile, NativePrepare);
@@ -288,7 +296,7 @@ index d9d1604..6218b4d 100644
      if (y >= kScreenHeight) return;
  
      uint8_t* row = rgb + y * kScreenWidth * 3;
-@@ -740,17 +860,10 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -740,17 +861,10 @@ void render_scanline_impl(uint8_t* rgb,
          return;
      }
  
@@ -309,7 +317,7 @@ index d9d1604..6218b4d 100644
  
      // â”€â”€ Windows (GBATEK "LCD I/O Windows") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
      // window_control(x) returns the 6-bit per-pixel mask (BG0-3, OBJ, and bit5
-@@ -782,12 +895,18 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -782,12 +896,18 @@ void render_scanline_impl(uint8_t* rgb,
      };
      const bool win0_row = win0_en && win_v_row(0x44);
      const bool win1_row = win1_en && win_v_row(0x46);
@@ -331,7 +339,7 @@ index d9d1604..6218b4d 100644
      }
      auto window_control = [&](uint32_t x) -> uint16_t {
          if (!any_window) return 0x3Fu;
-@@ -797,7 +916,24 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -797,7 +917,24 @@ void render_scanline_impl(uint8_t* rgb,
              return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
          return static_cast<uint16_t>(winout & 0x3Fu);
      };
@@ -357,7 +365,7 @@ index d9d1604..6218b4d 100644
      // The caller gives an immutable row snapshot. Resolve windows once, not
      // once per candidate/layer. No cross-row state or VRAM cache is retained.
      uint8_t row_control[GbaPpu::kScreenWidth];
-@@ -807,26 +943,34 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -807,26 +944,34 @@ void render_scanline_impl(uint8_t* rgb,
      // 0: no opaque candidate; 1: top needs the immediately following layer;
      // 2: final output is known. Jobs are globally ordered before sampling, so
      // completed pixels need no further tile, palette or candidate work.
@@ -403,7 +411,7 @@ index d9d1604..6218b4d 100644
      };
  
      uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
-@@ -835,22 +979,77 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -835,22 +980,77 @@ void render_scanline_impl(uint8_t* rgb,
      uint32_t second_targets = (bldcnt >> 8) & 0x3Fu;
      uint32_t effect = (bldcnt >> 6) & 0x3u;
  
@@ -486,7 +494,7 @@ index d9d1604..6218b4d 100644
          top[x].rgb[0] = backdrop_rgb[0];
          top[x].rgb[1] = backdrop_rgb[1];
          top[x].rgb[2] = backdrop_rgb[2];
-@@ -862,6 +1061,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -862,6 +1062,9 @@ void render_scanline_impl(uint8_t* rgb,
          top[x].target2 = (second_targets & (1u << 5)) != 0;
          top[x].valid = true;
      }
@@ -496,7 +504,7 @@ index d9d1604..6218b4d 100644
      auto submit = [&](uint32_t x,
                        uint16_t color,
                        int key,
-@@ -870,7 +1072,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -870,7 +1073,7 @@ void render_scanline_impl(uint8_t* rgb,
                        bool target2) {
          PixelCandidate cand;
          cand.color = color;
@@ -505,7 +513,7 @@ index d9d1604..6218b4d 100644
          to_rgb888(color, cand.rgb);
  #endif
          cand.key = key;
-@@ -975,63 +1177,184 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -975,63 +1178,184 @@ void render_scanline_impl(uint8_t* rgb,
              x += count;
          }
  #else
@@ -741,7 +749,7 @@ index d9d1604..6218b4d 100644
          }
  #endif
      };
-@@ -1156,6 +1479,8 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1156,6 +1480,8 @@ void render_scanline_impl(uint8_t* rgb,
      };
  
      GBA_RENDER_PHASE_MARK(profile, NativeBackground);
@@ -750,7 +758,7 @@ index d9d1604..6218b4d 100644
      if constexpr (!Ordered) {
          if (bg_mode == 0) {
              render_regular_bg(3, 0x0E, 0x1C);
-@@ -1176,6 +1501,8 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1176,6 +1502,8 @@ void render_scanline_impl(uint8_t* rgb,
  
      }
      GBA_RENDER_PHASE_MARK(profile, NativeForeign);
@@ -759,7 +767,7 @@ index d9d1604..6218b4d 100644
      // A bounded host-owned overlay is intentionally a native-world-only
      // presentation layer. It is composed after every guest BG candidate has
      // resolved but before the normal guest OBJ pass, so Link/HUD objects remain
-@@ -1211,9 +1538,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1211,9 +1539,9 @@ void render_scanline_impl(uint8_t* rgb,
                          cand.color = blend_alpha_gba555(overlay->pixels[source],
                                                           old_top.color, alpha,
                                                           16u - alpha);
@@ -771,7 +779,7 @@ index d9d1604..6218b4d 100644
                          // Same synthetic BG2 identity as a full foreign frame;
                          // regular guest OBJ keys are always in front of 0x10000.
                          cand.key = 0x10000;
-@@ -1239,7 +1566,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1239,7 +1567,7 @@ void render_scanline_impl(uint8_t* rgb,
          // to native BG/window state: keeping a room-authored window mask here
          // leaked screen-fixed house/door tiles over later foreign rooms. Guest
          // OBJ composition (including the focused Link OBJ) still happens below.
@@ -780,7 +788,7 @@ index d9d1604..6218b4d 100644
              for (uint32_t x = 0; x < kScreenWidth; ++x) {
                  if (foreign_hud_bg[x].valid) {
                      top[x] = foreign_hud_bg[x];
-@@ -1248,9 +1575,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1248,9 +1576,9 @@ void render_scanline_impl(uint8_t* rgb,
                  }
                  PixelCandidate cand;
                  cand.color = foreign[y * GbaPpu::kScreenWidth + x];
@@ -792,7 +800,7 @@ index d9d1604..6218b4d 100644
                  cand.key = 0x10000;
                  cand.layer = 2;
                  cand.target1 = blend_enabled(x) &&
-@@ -1264,6 +1591,8 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1264,6 +1592,8 @@ void render_scanline_impl(uint8_t* rgb,
  
      }
      GBA_RENDER_PHASE_MARK(profile, NativeObjects);
@@ -801,7 +809,7 @@ index d9d1604..6218b4d 100644
      constexpr uint32_t obj_tile_base = 0x10000u;
      const bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
      const uint8_t* obj_pal = pal + 0x200;
-@@ -1453,11 +1782,17 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1453,11 +1783,17 @@ void render_scanline_impl(uint8_t* rgb,
      }
  
      GBA_RENDER_PHASE_MARK(profile, NativeOutput);
@@ -819,7 +827,7 @@ index d9d1604..6218b4d 100644
          // Alpha blend top (1st target) with the layer below (2nd target). Per
          // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
          // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
-@@ -1479,7 +1814,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1479,7 +1815,7 @@ void render_scanline_impl(uint8_t* rgb,
                  : darken_gba555(top[x].color, bldy);
              to_rgb888(adjusted, dst);
          } else {
@@ -828,7 +836,7 @@ index d9d1604..6218b4d 100644
              to_rgb888(top[x].color, dst);
  #else
              dst[0] = top[x].rgb[0];
-@@ -1488,6 +1823,11 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1488,6 +1824,11 @@ void render_scanline_impl(uint8_t* rgb,
  #endif
          }
      }
@@ -840,11 +848,61 @@ index d9d1604..6218b4d 100644
      return;
  }
  
+@@ -2912,7 +3253,7 @@ void GbaPpu::render_scanline(uint32_t y,
+         state.y += pd;
+     }
+ 
+-    if (!rasterization_enabled_) return;
++    if (!frame_rasterized()) return;
+ #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+     // Capture at the existing post-affine, pre-HBlank-DMA boundary. Foreign
+     // content is not hardware input and must execute its original callback path.
+@@ -3030,7 +3371,7 @@ void GbaPpu::mark_framebuffer_latched() {
+         native_work_base_.reset();
+         native_latched_.reset();
+ #endif
+-    if (rasterization_enabled_)
++    if (frame_rasterized())
+         std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
+ #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+         native_latched_materialized_ = true;
+@@ -3118,11 +3459,10 @@ void GbaPpu::set_rasterization_enabled(bool enabled) {
+ #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+     invalidate_native_draw();
+ #endif
++    // Disabling rasterization must not clear either buffer: a skipped frame
++    // then leaves the last complete image latched, so the panel keeps showing
++    // it instead of a zeroed (black) frame.
+     rasterization_enabled_ = enabled;
+-    if (!enabled) {
+-        std::fill(work_fb_.begin(),work_fb_.end(),0);
+-        std::fill(latched_fb_.begin(),latched_fb_.end(),0);
+-    }
+ }
+ 
+ }  // namespace gba
 diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.h b/third_party/gbarecomp-main/src/gba/gba_ppu.h
-index 69c2465..6e853f4 100644
+index 69c2465..4b6c9ee 100644
 --- a/third_party/gbarecomp-main/src/gba/gba_ppu.h
 +++ b/third_party/gbarecomp-main/src/gba/gba_ppu.h
-@@ -159,8 +159,14 @@ public:
+@@ -85,6 +85,16 @@ public:
+     // in a network match uses this policy; only its host mirror draws pixels.
+     void set_rasterization_enabled(bool enabled);
+     bool rasterization_enabled() const { return rasterization_enabled_; }
++    // Skip the compositor on all frames whose index is not a multiple of
++    // `every`. Skipped frames keep the previously latched image, so the host
++    // may keep presenting the last complete frame. 0/1 disables skipping.
++    void set_frame_skip(uint32_t every) {
++        frame_skip_ = every ? every : 1u;
++        frame_phase_ = 0;
++    }
++    bool frame_rasterized() const {
++        return rasterization_enabled_ && frame_phase_ == 0u;
++    }
+     // Compose a separate surface using the source's pre-scanline affine
+     // registers, including HBlank DMA reloads. Does not advance either PPU.
+     void render_presentation_scanline(const GbaPpu& source, uint32_t y,
+@@ -159,8 +169,14 @@ public:
      static constexpr uint32_t kMaxExtraY = 352;
      static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 1280
      static constexpr uint32_t kMaxRenderHeight = kScreenHeight + 2u * kMaxExtraY;  // 864
@@ -859,7 +917,16 @@ index 69c2465..6e853f4 100644
  
      // Set the per-side view margins (clamped to the compile-time max per axis).
      // Call once at runtime init from the runner's --widescreen wiring.
-@@ -252,8 +258,13 @@ private:
+@@ -236,6 +252,8 @@ private:
+     HighResolutionAffineProvider high_resolution_provider_ = nullptr;
+     PresentationObserver* presentation_ = nullptr; // borrowed; not serialized
+     bool rasterization_enabled_ = true; // host configuration, not serialized
++    uint32_t frame_skip_ = 1;           // host configuration, not serialized
++    uint32_t frame_phase_ = 0;          // 0 == rasterize this frame
+     uint32_t scanline_        = 0;   // 0..227
+     uint32_t dot_in_scanline_ = 0;   // 0..307 (in dots, not cycles)
+     uint32_t cycle_in_dot_    = 0;   // 0..3
+@@ -252,8 +270,13 @@ private:
      // directly produced a horizontal one-frame-stale tear band at whatever
      // scanline the guest happened to have rendered to (the Minish Cap
      // walk-scroll "warble").
