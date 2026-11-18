@@ -98,8 +98,9 @@ uint32_t g_report_cycle = 0;
 extern "C" {
 extern unsigned g_mem_prof_cnt[2][9];
 extern unsigned g_mem_prof_cyc[2][9];
-// PPU render split (gba_ppu.cpp): prepare / bg / foreign / obj+jobs / output.
-extern unsigned g_ppu_phase_cyc[5];
+// PPU render split (gba_ppu.cpp): OBJ window / row windows / prepare / bg /
+// foreign / OBJ candidate scan / OBJ fill / output.
+extern unsigned g_ppu_phase_cyc[8];
 extern unsigned g_ppu_phase_rows;
 }
 #endif
@@ -121,22 +122,29 @@ void perf_report(void)
                (unsigned int)to_ms(g_halt_cycles), (unsigned int)g_halt_pumps,
                (unsigned int)to_ms(g_present_cycles), (unsigned int)g_present_count);
 
-    // PPU render split. The five buckets are consecutive slices of one
-    // scanline, so their sum is the whole render cost inside halt.
+    // PPU render split. The eight buckets are consecutive slices of one
+    // scanline, so their sum is the whole render cost inside halt. winobj /
+    // winrow are the two halves of the old `prep`; objscan / objfill are the
+    // two halves of the old `obj`.
     {
-        const uint32_t prep = g_ppu_phase_cyc[0];
-        const uint32_t bg = g_ppu_phase_cyc[1];
-        const uint32_t fgn = g_ppu_phase_cyc[2];
-        const uint32_t obj = g_ppu_phase_cyc[3];
-        const uint32_t out = g_ppu_phase_cyc[4];
-        const uint32_t total = prep + bg + fgn + obj + out;
-        rt_kprintf("[gba] render 60f: %u ms %u rows (%u cyc/row) | prep %u bg %u fgn %u obj %u out %u\n",
+        uint32_t total = 0;
+        for (unsigned int i = 0; i < 8u; ++i)
+        {
+            total += g_ppu_phase_cyc[i];
+        }
+        rt_kprintf("[gba] render 60f: %u ms %u rows (%u cyc/row) | bg %u fgn %u out %u\n",
                    (unsigned int)to_ms(total), (unsigned int)g_ppu_phase_rows,
                    (unsigned int)(g_ppu_phase_rows != 0u ? total / g_ppu_phase_rows : 0u),
-                   (unsigned int)to_ms(prep), (unsigned int)to_ms(bg),
-                   (unsigned int)to_ms(fgn), (unsigned int)to_ms(obj),
-                   (unsigned int)to_ms(out));
-        for (unsigned int i = 0; i < 5u; ++i)
+                   (unsigned int)to_ms(g_ppu_phase_cyc[3]),
+                   (unsigned int)to_ms(g_ppu_phase_cyc[4]),
+                   (unsigned int)to_ms(g_ppu_phase_cyc[7]));
+        rt_kprintf("[gba] render2 60f: winobj %u winrow %u prep %u | objscan %u objfill %u\n",
+                   (unsigned int)to_ms(g_ppu_phase_cyc[0]),
+                   (unsigned int)to_ms(g_ppu_phase_cyc[1]),
+                   (unsigned int)to_ms(g_ppu_phase_cyc[2]),
+                   (unsigned int)to_ms(g_ppu_phase_cyc[5]),
+                   (unsigned int)to_ms(g_ppu_phase_cyc[6]));
+        for (unsigned int i = 0; i < 8u; ++i)
         {
             g_ppu_phase_cyc[i] = 0;
         }
