@@ -98,6 +98,9 @@ uint32_t g_report_cycle = 0;
 extern "C" {
 extern unsigned g_mem_prof_cnt[2][9];
 extern unsigned g_mem_prof_cyc[2][9];
+// PPU render split (gba_ppu.cpp): prepare / bg / foreign / obj+jobs / output.
+extern unsigned g_ppu_phase_cyc[5];
+extern unsigned g_ppu_phase_rows;
 }
 #endif
 
@@ -117,6 +120,28 @@ void perf_report(void)
                (unsigned int)to_ms(g_dispatch_cycles), (unsigned int)g_dispatch_calls,
                (unsigned int)to_ms(g_halt_cycles), (unsigned int)g_halt_pumps,
                (unsigned int)to_ms(g_present_cycles), (unsigned int)g_present_count);
+
+    // PPU render split. The five buckets are consecutive slices of one
+    // scanline, so their sum is the whole render cost inside halt.
+    {
+        const uint32_t prep = g_ppu_phase_cyc[0];
+        const uint32_t bg = g_ppu_phase_cyc[1];
+        const uint32_t fgn = g_ppu_phase_cyc[2];
+        const uint32_t obj = g_ppu_phase_cyc[3];
+        const uint32_t out = g_ppu_phase_cyc[4];
+        const uint32_t total = prep + bg + fgn + obj + out;
+        rt_kprintf("[gba] render 60f: %u ms %u rows (%u cyc/row) | prep %u bg %u fgn %u obj %u out %u\n",
+                   (unsigned int)to_ms(total), (unsigned int)g_ppu_phase_rows,
+                   (unsigned int)(g_ppu_phase_rows != 0u ? total / g_ppu_phase_rows : 0u),
+                   (unsigned int)to_ms(prep), (unsigned int)to_ms(bg),
+                   (unsigned int)to_ms(fgn), (unsigned int)to_ms(obj),
+                   (unsigned int)to_ms(out));
+        for (unsigned int i = 0; i < 5u; ++i)
+        {
+            g_ppu_phase_cyc[i] = 0;
+        }
+        g_ppu_phase_rows = 0;
+    }
 
     // Guest load/store split (see g_mem_prof_* in runtime_bus_bridge.cpp):
     // host ms / access count per GBA region. These buckets cover only the time
