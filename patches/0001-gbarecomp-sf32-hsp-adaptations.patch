@@ -144,10 +144,10 @@ index 72ca9ec..da73969 100644
      ShadowVerifier vf_{};
      uint8_t  count_mode_ = 0;
 diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
-index d9d1604..6b9c5d8 100644
+index d9d1604..d2cf162 100644
 --- a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
 +++ b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
-@@ -19,6 +19,30 @@
+@@ -19,6 +19,41 @@
  
  namespace gba {
  
@@ -161,6 +161,11 @@ index d9d1604..6b9c5d8 100644
 +}
 +extern "C" unsigned g_ppu_phase_cyc[8] = {};
 +extern "C" unsigned g_ppu_phase_rows = 0;
++// Per-layer detail of the single `bg` bucket above (plan §0.16 B-2a). Index:
++// 0..3 = text BG0..BG3 (cycles and pixels that reached the per-pixel loop),
++// 4..5 = affine BG2/BG3, 6 = bitmap BG2. Same probes build only.
++extern "C" unsigned g_bg_phase_cyc[7] = {};
++extern "C" unsigned g_bg_phase_px[7] = {};
 +#define PPU_PROF_BEGIN() unsigned _ppu_t_ = ppu_prof_now()
 +#define PPU_PROF_CUT(i)                                    \
 +    do {                                                   \
@@ -169,16 +174,22 @@ index d9d1604..6b9c5d8 100644
 +        _ppu_t_ = _n_;                                     \
 +    } while (0)
 +#define PPU_PROF_ROW() (++g_ppu_phase_rows)
++#define PPU_BG_BEGIN() unsigned _ppu_bg_t_ = ppu_prof_now()
++#define PPU_BG_END(i) (g_bg_phase_cyc[i] += ppu_prof_now() - _ppu_bg_t_)
++#define PPU_BG_PX(i, n) (g_bg_phase_px[i] += (n))
 +#else
 +#define PPU_PROF_BEGIN() ((void)0)
 +#define PPU_PROF_CUT(i) ((void)0)
 +#define PPU_PROF_ROW() ((void)0)
++#define PPU_BG_BEGIN() ((void)0)
++#define PPU_BG_END(i) ((void)0)
++#define PPU_BG_PX(i, n) ((void)0)
 +#endif
 +
  #if defined(GBARECOMP_ORDERED_DRAW_TEST_COVERAGE)
  static uint64_t ordered_draw_test_rows = 0;
  extern "C" uint64_t gba_ordered_draw_test_rows() { return ordered_draw_test_rows; }
-@@ -28,6 +52,15 @@ static uint64_t ordered_wide_text_span_test_jobs = 0;
+@@ -28,6 +63,15 @@ static uint64_t ordered_wide_text_span_test_jobs = 0;
  extern "C" uint64_t gba_ordered_wide_text_span_test_jobs() { return ordered_wide_text_span_test_jobs; }
  #endif
  
@@ -194,7 +205,7 @@ index d9d1604..6b9c5d8 100644
  // Widescreen margin tilemap provider (Step C). When set (by the runtime-side
  // sidecar) and the wide path samples a margin column (hardware x outside
  // 0..239), the BG text-tilemap entry is sourced from this hook (the true
-@@ -277,6 +310,7 @@ GbaPpu::TickEvents GbaPpu::tick(uint32_t cycles, uint16_t vcount_compare) {
+@@ -277,6 +321,7 @@ GbaPpu::TickEvents GbaPpu::tick(uint32_t cycles, uint16_t vcount_compare) {
              if (scanline_ >= kLinesTotal) {
                  scanline_ = 0;
                  ++frame_count_;
@@ -202,7 +213,7 @@ index d9d1604..6b9c5d8 100644
                  ev.frame_completed = true;
              }
              vcount_ = static_cast<uint16_t>(scanline_);
-@@ -721,6 +755,41 @@ void mark_obj_window_scanline(bool* mask,
+@@ -721,6 +766,41 @@ void mark_obj_window_scanline(bool* mask,
      }
  }
  
@@ -244,7 +255,7 @@ index d9d1604..6b9c5d8 100644
  template<bool Ordered, bool HardwareOnly = false>
  void render_scanline_impl(uint8_t* rgb,
                                uint32_t y,
-@@ -732,6 +801,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -732,6 +812,7 @@ void render_scanline_impl(uint8_t* rgb,
                                uint32_t kScreenWidth,
                                uint32_t kScreenHeight) {
      GBA_RENDER_PHASE_BEGIN(profile, NativePrepare);
@@ -252,7 +263,7 @@ index d9d1604..6b9c5d8 100644
      if (y >= kScreenHeight) return;
  
      uint8_t* row = rgb + y * kScreenWidth * 3;
-@@ -740,17 +810,10 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -740,17 +821,10 @@ void render_scanline_impl(uint8_t* rgb,
          return;
      }
  
@@ -273,7 +284,7 @@ index d9d1604..6b9c5d8 100644
  
      // â”€â”€ Windows (GBATEK "LCD I/O Windows") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
      // window_control(x) returns the 6-bit per-pixel mask (BG0-3, OBJ, and bit5
-@@ -782,13 +845,20 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -782,13 +856,20 @@ void render_scanline_impl(uint8_t* rgb,
      };
      const bool win0_row = win0_en && win_v_row(0x44);
      const bool win1_row = win1_en && win_v_row(0x46);
@@ -297,7 +308,7 @@ index d9d1604..6b9c5d8 100644
      auto window_control = [&](uint32_t x) -> uint16_t {
          if (!any_window) return 0x3Fu;
          if (win0_row && win_h_in(0x40, x)) return winin & 0x3Fu;
-@@ -797,7 +867,24 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -797,7 +878,24 @@ void render_scanline_impl(uint8_t* rgb,
              return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
          return static_cast<uint16_t>(winout & 0x3Fu);
      };
@@ -323,7 +334,7 @@ index d9d1604..6b9c5d8 100644
      // The caller gives an immutable row snapshot. Resolve windows once, not
      // once per candidate/layer. No cross-row state or VRAM cache is retained.
      uint8_t row_control[GbaPpu::kScreenWidth];
-@@ -807,26 +894,35 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -807,26 +905,35 @@ void render_scanline_impl(uint8_t* rgb,
      // 0: no opaque candidate; 1: top needs the immediately following layer;
      // 2: final output is known. Jobs are globally ordered before sampling, so
      // completed pixels need no further tile, palette or candidate work.
@@ -370,7 +381,7 @@ index d9d1604..6b9c5d8 100644
      };
  
      uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
-@@ -835,22 +931,77 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -835,22 +942,77 @@ void render_scanline_impl(uint8_t* rgb,
      uint32_t second_targets = (bldcnt >> 8) & 0x3Fu;
      uint32_t effect = (bldcnt >> 6) & 0x3u;
  
@@ -453,7 +464,7 @@ index d9d1604..6b9c5d8 100644
          top[x].rgb[0] = backdrop_rgb[0];
          top[x].rgb[1] = backdrop_rgb[1];
          top[x].rgb[2] = backdrop_rgb[2];
-@@ -862,6 +1013,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -862,6 +1024,9 @@ void render_scanline_impl(uint8_t* rgb,
          top[x].target2 = (second_targets & (1u << 5)) != 0;
          top[x].valid = true;
      }
@@ -463,7 +474,7 @@ index d9d1604..6b9c5d8 100644
      auto submit = [&](uint32_t x,
                        uint16_t color,
                        int key,
-@@ -870,7 +1024,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -870,7 +1035,7 @@ void render_scanline_impl(uint8_t* rgb,
                        bool target2) {
          PixelCandidate cand;
          cand.color = color;
@@ -472,7 +483,23 @@ index d9d1604..6b9c5d8 100644
          to_rgb888(color, cand.rgb);
  #endif
          cand.key = key;
-@@ -975,63 +1129,158 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -911,6 +1076,7 @@ void render_scanline_impl(uint8_t* rgb,
+                                  uint32_t cnt_off,
+                                  uint32_t scroll_off) {
+         if ((dispcnt & (0x0100u << layer)) == 0) return;
++        PPU_BG_BEGIN();
+ 
+         uint16_t bgcnt = static_cast<uint16_t>(
+             io[cnt_off] | (io[cnt_off + 1] << 8));
+@@ -951,6 +1117,7 @@ void render_scanline_impl(uint8_t* rgb,
+             const uint32_t tile_row = char_base + (entry & 0x03FFu) *
+                 (color256 ? 64u : 32u) + py * (color256 ? 8u : 4u);
+             const uint32_t palette_bank = (entry >> 12) & 15u;
++            PPU_BG_PX(layer, count);
+             for (uint32_t j = 0; j < count; ++j) {
+                 const uint32_t screen_x = x + j;
+                 if (!layer_enabled(screen_x, layer)) continue;
+@@ -975,71 +1142,169 @@ void render_scanline_impl(uint8_t* rgb,
              x += count;
          }
  #else
@@ -605,6 +632,7 @@ index d9d1604..6b9c5d8 100644
 -                hud.color = color;
 -#if !defined(GBARECOMP_SCANLINE_HLE)
 -                to_rgb888(color, hud.rgb);
++            PPU_BG_PX(layer, count);
 +            // 4bpp pixels share one tile byte in pairs; reuse the last fetch so
 +            // a run costs four tile-data reads instead of eight.
 +            uint32_t cached_addr = 0xFFFFFFFFu;
@@ -681,16 +709,47 @@ index d9d1604..6b9c5d8 100644
 +            x += count;
          }
  #endif
++        PPU_BG_END(layer);
      };
-@@ -1155,6 +1404,7 @@ void render_scanline_impl(uint8_t* rgb,
+ 
+     auto render_affine_bg = [&](uint32_t layer,
+                                 uint32_t cnt_off,
+                                 uint32_t param_off) {
+         if ((dispcnt & (0x0100u << layer)) == 0) return;
++        PPU_BG_BEGIN();
+ 
+         uint16_t bgcnt = static_cast<uint16_t>(io[cnt_off] |
+                                                (io[cnt_off + 1] << 8));
+@@ -1087,6 +1352,8 @@ void render_scanline_impl(uint8_t* rgb,
+                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                    (second_targets & (1u << layer)) != 0);
          }
++        PPU_BG_PX(4 + (layer - 2), kScreenWidth);
++        PPU_BG_END(4 + (layer - 2));
+     };
+ 
+     // â”€â”€ Bitmap BG modes 3/4/5 (GBATEK "LCD VRAM Bitmap BG Modes") â”€â”€â”€â”€â”€â”€â”€
+@@ -1108,6 +1375,7 @@ void render_scanline_impl(uint8_t* rgb,
+     // out-of-range texel here is transparent rather than wrapped.
+     auto render_bitmap_bg = [&]() {
+         if ((dispcnt & 0x0400u) == 0) return;   // DISPCNT bit10 = BG2 enable
++        PPU_BG_BEGIN();
+         constexpr uint32_t layer = 2;
+         uint16_t bgcnt = static_cast<uint16_t>(io[0x0C] | (io[0x0D] << 8));
+         int bg_priority = static_cast<int>(bgcnt & 0x3u);
+@@ -1153,8 +1421,11 @@ void render_scanline_impl(uint8_t* rgb,
+                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                    (second_targets & (1u << layer)) != 0);
+         }
++        PPU_BG_PX(6, kScreenWidth);
++        PPU_BG_END(6);
      };
  
 +    PPU_PROF_CUT(2);   // remaining prepare: BLDCNT/targets, row buffers, lambdas
      GBA_RENDER_PHASE_MARK(profile, NativeBackground);
      if constexpr (!Ordered) {
          if (bg_mode == 0) {
-@@ -1175,6 +1425,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1175,6 +1446,7 @@ void render_scanline_impl(uint8_t* rgb,
          }
  
      }
@@ -698,7 +757,7 @@ index d9d1604..6b9c5d8 100644
      GBA_RENDER_PHASE_MARK(profile, NativeForeign);
      // A bounded host-owned overlay is intentionally a native-world-only
      // presentation layer. It is composed after every guest BG candidate has
-@@ -1211,9 +1462,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1211,9 +1483,9 @@ void render_scanline_impl(uint8_t* rgb,
                          cand.color = blend_alpha_gba555(overlay->pixels[source],
                                                           old_top.color, alpha,
                                                           16u - alpha);
@@ -710,7 +769,7 @@ index d9d1604..6b9c5d8 100644
                          // Same synthetic BG2 identity as a full foreign frame;
                          // regular guest OBJ keys are always in front of 0x10000.
                          cand.key = 0x10000;
-@@ -1239,7 +1490,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1239,7 +1511,7 @@ void render_scanline_impl(uint8_t* rgb,
          // to native BG/window state: keeping a room-authored window mask here
          // leaked screen-fixed house/door tiles over later foreign rooms. Guest
          // OBJ composition (including the focused Link OBJ) still happens below.
@@ -719,7 +778,7 @@ index d9d1604..6b9c5d8 100644
              for (uint32_t x = 0; x < kScreenWidth; ++x) {
                  if (foreign_hud_bg[x].valid) {
                      top[x] = foreign_hud_bg[x];
-@@ -1248,9 +1499,9 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1248,9 +1520,9 @@ void render_scanline_impl(uint8_t* rgb,
                  }
                  PixelCandidate cand;
                  cand.color = foreign[y * GbaPpu::kScreenWidth + x];
@@ -731,7 +790,7 @@ index d9d1604..6b9c5d8 100644
                  cand.key = 0x10000;
                  cand.layer = 2;
                  cand.target1 = blend_enabled(x) &&
-@@ -1263,6 +1514,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1263,6 +1535,7 @@ void render_scanline_impl(uint8_t* rgb,
          }
  
      }
@@ -739,7 +798,7 @@ index d9d1604..6b9c5d8 100644
      GBA_RENDER_PHASE_MARK(profile, NativeObjects);
      constexpr uint32_t obj_tile_base = 0x10000u;
      const bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
-@@ -1303,6 +1555,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1303,6 +1576,7 @@ void render_scanline_impl(uint8_t* rgb,
          // into the next priority's BG band.
          int key = priority * 256 + idx;
          bool obj_target2 = (second_targets & (1u << 4)) != 0;
@@ -747,7 +806,7 @@ index d9d1604..6b9c5d8 100644
          auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
              if (screen_x < 0 || screen_x >= static_cast<int>(kScreenWidth)) return;
              if (!layer_enabled(static_cast<uint32_t>(screen_x), 4)) return;
-@@ -1366,6 +1619,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1366,6 +1640,7 @@ void render_scanline_impl(uint8_t* rgb,
                  if (tex_y < 0 || tex_y >= sh) continue;
                  emit_obj(tex_x, tex_y, sx + i);
              }
@@ -755,7 +814,7 @@ index d9d1604..6b9c5d8 100644
              return;
          }
          const ForeignObjFocusResult focus_result = [&] {
-@@ -1393,6 +1647,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1393,6 +1668,7 @@ void render_scanline_impl(uint8_t* rgb,
              int src_px = hflip ? (7 - px) : px;
              emit_obj(src_tx * 8 + src_px, src_ty * 8 + src_py, sx + dx);
          }
@@ -763,7 +822,7 @@ index d9d1604..6b9c5d8 100644
      };
      if constexpr (!Ordered) {
          if (dispcnt & 0x1000u)
-@@ -1452,12 +1707,17 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1452,12 +1728,17 @@ void render_scanline_impl(uint8_t* rgb,
          }
      }
  
@@ -781,7 +840,7 @@ index d9d1604..6b9c5d8 100644
          // Alpha blend top (1st target) with the layer below (2nd target). Per
          // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
          // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
-@@ -1479,7 +1739,7 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1479,7 +1760,7 @@ void render_scanline_impl(uint8_t* rgb,
                  : darken_gba555(top[x].color, bldy);
              to_rgb888(adjusted, dst);
          } else {
@@ -790,7 +849,7 @@ index d9d1604..6b9c5d8 100644
              to_rgb888(top[x].color, dst);
  #else
              dst[0] = top[x].rgb[0];
-@@ -1488,6 +1748,11 @@ void render_scanline_impl(uint8_t* rgb,
+@@ -1488,6 +1769,11 @@ void render_scanline_impl(uint8_t* rgb,
  #endif
          }
      }
@@ -802,7 +861,7 @@ index d9d1604..6b9c5d8 100644
      return;
  }
  
-@@ -2912,7 +3177,7 @@ void GbaPpu::render_scanline(uint32_t y,
+@@ -2912,7 +3198,7 @@ void GbaPpu::render_scanline(uint32_t y,
          state.y += pd;
      }
  
@@ -811,7 +870,7 @@ index d9d1604..6b9c5d8 100644
  #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
      // Capture at the existing post-affine, pre-HBlank-DMA boundary. Foreign
      // content is not hardware input and must execute its original callback path.
-@@ -3030,7 +3295,7 @@ void GbaPpu::mark_framebuffer_latched() {
+@@ -3030,7 +3316,7 @@ void GbaPpu::mark_framebuffer_latched() {
          native_work_base_.reset();
          native_latched_.reset();
  #endif
@@ -820,7 +879,7 @@ index d9d1604..6b9c5d8 100644
          std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
  #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
          native_latched_materialized_ = true;
-@@ -3118,11 +3383,10 @@ void GbaPpu::set_rasterization_enabled(bool enabled) {
+@@ -3118,11 +3404,10 @@ void GbaPpu::set_rasterization_enabled(bool enabled) {
  #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
      invalidate_native_draw();
  #endif
@@ -895,7 +954,7 @@ index 69c2465..4b6c9ee 100644
  
      struct AffineLineState {
 diff --git a/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp b/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
-index fa45091..0942805 100644
+index fa45091..76e6fac 100644
 --- a/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
 +++ b/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
 @@ -30,7 +30,9 @@
@@ -1089,6 +1148,40 @@ index fa45091..0942805 100644
  }
  
  extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
+@@ -804,6 +873,16 @@ static void account_host_service_instructions(uint32_t count) {
+     }
+ }
+ 
++#if defined(GBARECOMP_PERF_PROBES)
++// Device-materialization flush inside runtime_tick (plan §0.16 `disp`
++// breakdown). Two DWT reads per event boundary (roughly once per scanline),
++// never per guest instruction. Printed and reset per 60 frames by
++// src/gba_device.cpp; the PPU `bg`/`obj` buckets are a subset of this block.
++extern "C" unsigned long long g_flush_cyc = 0;
++extern "C" unsigned g_flush_calls = 0;
++static inline unsigned flush_probe_now(void) { return *(volatile unsigned *)0xE0001004u; }
++#endif
++
+ extern "C" void runtime_tick(uint32_t cycles) {
+     if (g_session_execution) { g_runtime_cycles += cycles; return; }
+     // P6 shadow-tick: a healed shard's validation re-run only accumulates its
+@@ -830,9 +909,16 @@ extern "C" void runtime_tick(uint32_t cycles) {
+     g_pending_cycles += cycles;
+     g_event_budget   -= static_cast<long long>(cycles);
+     if (g_event_budget <= 0) {
++#if defined(GBARECOMP_PERF_PROBES)
++        const unsigned flush_t0 = flush_probe_now();
++#endif
+         tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
+         g_pending_cycles = 0;
+         recompute_event_budget(bus, ppu);
++#if defined(GBARECOMP_PERF_PROBES)
++        g_flush_cyc += flush_probe_now() - flush_t0;
++        ++g_flush_calls;
++#endif
+     }
+ 
+     // A timed/FIFO DMA may have fired inside that flush; charge its stolen bus
 diff --git a/third_party/gbarecomp-main/src/gba/psram_alloc.h b/third_party/gbarecomp-main/src/gba/psram_alloc.h
 new file mode 100644
 index 0000000..73749bd

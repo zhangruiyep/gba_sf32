@@ -83,11 +83,14 @@ void perf_start(void)
 #endif
 }
 
-uint32_t g_dispatch_cycles = 0;
+// 64-bit accumulators: a 60-frame window in the race scene reaches 21 s, which
+// overflows a 32-bit cycle count (2^32 / 240 MHz = 17.9 s) and silently
+// under-reports the bucket by 17,895 ms (plan §0.16, 17:46:31 row).
+uint64_t g_dispatch_cycles = 0;
 uint32_t g_dispatch_calls = 0;
-uint32_t g_halt_cycles = 0;
+uint64_t g_halt_cycles = 0;
 uint32_t g_halt_pumps = 0;
-uint32_t g_present_cycles = 0;
+uint64_t g_present_cycles = 0;
 uint32_t g_present_count = 0;
 uint32_t g_report_tick = 0;
 uint32_t g_report_cycle = 0;
@@ -102,12 +105,22 @@ extern unsigned g_mem_prof_cyc[2][9];
 // foreign / OBJ candidate scan / OBJ fill / output.
 extern unsigned g_ppu_phase_cyc[8];
 extern unsigned g_ppu_phase_rows;
+// Per-layer detail of the `bg` bucket: text BG0..BG3, affine BG2/BG3, bitmap.
+extern unsigned g_bg_phase_cyc[7];
+extern unsigned g_bg_phase_px[7];
+// `disp` breakdown (plan §0.16): Tier3 interpreter time (gba_device_stubs.cpp)
+// and the device-materialization flush inside runtime_tick (runtime_bus_bridge).
+extern unsigned long long g_interp_cyc;
+extern unsigned g_interp_calls;
+extern unsigned long long g_interp_insns;
+extern unsigned long long g_flush_cyc;
+extern unsigned g_flush_calls;
 }
 #endif
 
-uint32_t to_ms(uint32_t cycles)
+uint32_t to_ms(uint64_t cycles)
 {
-    return (uint32_t)(((std::uint64_t)cycles * 1000u) / kCoreHz);
+    return (uint32_t)((cycles * 1000u) / kCoreHz);
 }
 
 void perf_report(void)
@@ -149,6 +162,39 @@ void perf_report(void)
             g_ppu_phase_cyc[i] = 0;
         }
         g_ppu_phase_rows = 0;
+
+        // Per-layer detail of the `bg` bucket (plan §0.16 B-2a), printed as
+        // milliseconds / pixels that reached the per-pixel loop.
+        rt_kprintf("[gba] bgL 60f: r0 %u/%u r1 %u/%u r2 %u/%u r3 %u/%u (ms/px)\n",
+                   (unsigned int)to_ms(g_bg_phase_cyc[0]), (unsigned int)g_bg_phase_px[0],
+                   (unsigned int)to_ms(g_bg_phase_cyc[1]), (unsigned int)g_bg_phase_px[1],
+                   (unsigned int)to_ms(g_bg_phase_cyc[2]), (unsigned int)g_bg_phase_px[2],
+                   (unsigned int)to_ms(g_bg_phase_cyc[3]), (unsigned int)g_bg_phase_px[3]);
+        rt_kprintf("[gba] bgX 60f: a2 %u/%u a3 %u/%u bmp %u/%u (ms/px)\n",
+                   (unsigned int)to_ms(g_bg_phase_cyc[4]), (unsigned int)g_bg_phase_px[4],
+                   (unsigned int)to_ms(g_bg_phase_cyc[5]), (unsigned int)g_bg_phase_px[5],
+                   (unsigned int)to_ms(g_bg_phase_cyc[6]), (unsigned int)g_bg_phase_px[6]);
+        for (unsigned int i = 0; i < 7u; ++i)
+        {
+            g_bg_phase_cyc[i] = 0;
+            g_bg_phase_px[i] = 0;
+        }
+
+        // `disp` breakdown (plan §0.16): Tier3 time is a subset of `disp`
+        // (miss-driven bridging runs inside the dispatch call) and `flush` is
+        // the device-materialization block inside runtime_tick, which is where
+        // scanline rendering happens when the guest never halts. `flush` also
+        // contains the `bg`/`obj` buckets above; `disp` minus `interp`, `flush`
+        // and the memtot buckets is AOT instruction work.
+        rt_kprintf("[gba] dispX 60f: interp %u ms %u calls %u kinsns | flush %u ms %u\n",
+                   (unsigned int)to_ms(g_interp_cyc), (unsigned int)g_interp_calls,
+                   (unsigned int)(g_interp_insns / 1000u),
+                   (unsigned int)to_ms(g_flush_cyc), (unsigned int)g_flush_calls);
+        g_interp_cyc = 0;
+        g_interp_calls = 0;
+        g_interp_insns = 0;
+        g_flush_cyc = 0;
+        g_flush_calls = 0;
     }
 
     // Guest load/store split (see g_mem_prof_* in runtime_bus_bridge.cpp):

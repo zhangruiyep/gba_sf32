@@ -110,6 +110,31 @@ extern "C" void runtime_force_interp_step(void)
     halt("interpreter step requested", g_cpu.R[15]);
 }
 
+#if defined(GBARECOMP_PERF_PROBES)
+// Tier3 cost probe (plan §0.16 `disp` breakdown): wall time and interpreted
+// instruction count of the dispatch-miss bridge. Printed/reset per 60 frames by
+// gba_device.cpp. Only the bridge pays the two DWT reads, not runtime_tick.
+extern "C" unsigned long long g_interp_cyc = 0;
+extern "C" unsigned g_interp_calls = 0;
+extern "C" unsigned long long g_interp_insns = 0;
+namespace
+{
+inline unsigned interp_probe_now(void) { return *(volatile unsigned *)0xE0001004u; }
+struct InterpProbe
+{
+    unsigned t0;
+    const std::uint64_t &insns;
+    explicit InterpProbe(const std::uint64_t &n) : t0(interp_probe_now()), insns(n) {}
+    ~InterpProbe(void)
+    {
+        g_interp_cyc += interp_probe_now() - t0;
+        g_interp_insns += insns;
+        ++g_interp_calls;
+    }
+};
+}  // namespace
+#endif
+
 // Device port of the host self-heal bridge (runtime_arm_default_aborts.cpp).
 // Runs the reference interpreter from `entry_pc` until control returns into
 // statically compiled code, then leaves g_cpu at the resume point so the
@@ -156,6 +181,9 @@ extern "C" int runtime_bridge_interpret(std::uint32_t entry_pc, bool entry_thumb
     std::uint32_t unwound_depth = 0xFFFFFFFFu;
     std::uint64_t iters = 0;
     std::uint64_t bridged = 0;
+#if defined(GBARECOMP_PERF_PROBES)
+    const InterpProbe interp_probe(bridged);
+#endif
 
     for (;;)
     {
