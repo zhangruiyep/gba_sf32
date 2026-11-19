@@ -1,6 +1,6 @@
 # GBA ROM 重编译到思澈黄山派 实施计划
 
-> 最后更新：2026-11-18
+> 最后更新：2026-11-19
 
 ## 0. 当前状态总览
 
@@ -11,7 +11,7 @@
 | Phase 2-A | 仓库根独立 scons 工程骨架 | ✅ 编译通过（`main.bin` 325,240 B） |
 | Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成（当时的「滚动彩条」实为 165×15 坐标 bug，已在 2-C 修复） |
 | Phase 2-C | runtime 移植到 SiFli HAL | ✅ 完成并真机验证（BIOS 从 reset vector 跑到空闲态，236 个函数入口，无 fault；修复送屏几何后居中 240×160 白块，2026-11-11 复烧确认） |
-| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.3。性能优化中（2026-11-16：≈7.2 fps / 13.9% 实时）；2026-11-17 的 BG run 优化因画面异常整批回退，见 §0.4–§0.6；目标已由 60 fps 修正为 7→10 fps，见 §0.7–§0.8；11-17 逐步小改三组实测见 §0.9（6.7–7.3 fps 赛道 / 9.0 菜单）；11-17 16:29 加上虚拟手柄后，赛道 3.3–5.9 fps，见 §0.10；11-18 加入跳帧（隔帧渲染）并真机验收，render 3.46→1.7–2.1 s/60f，7.2→8.7–10.0 fps，见 §0.11（验收后已关闭开关，回到每帧基线以优化 disp）；11-18 访存探针实测：访存只占 `disp` 12–16%，瓶颈在 AOT 指令执行与 render，候选方案 A/B/C 已归档，见 §0.12–§0.14；当前执行 B（恢复 render 探针），每帧基线 7.7–8.3 fps；B 分段已出数（bg 占 render 56–77%、obj 其次）、B-1 八桶已实测（全段停留主界面：重 bg 路径 bg 76%、OBJ 路径两桶 49%），见 §0.15；B-2 已细分为 B-2a–d 并定回退纪律，B-2a（bg 按层细分探针）已烧录实测：标题/菜单/赛道三段分层数据出齐，bg 由 text 层主导，下一步 B-2c；赛道瓶颈已转为 `disp`（73%），见 §0.16 |
+| Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch 联动 | ✅ 完成并真机验证（2026-11-13 12:12）：屏幕已出 Mario Kart 游戏画面；入口种子 `0x08000000` 生效；9 个 miss PC（`0805F624` 等）由 Tier3 解释器自愈，累计 51 次后收敛，全程无 FATAL；`frame 720 / vblank 741` 持续推进，≈5.0 fps（8.4% 实时）。路线：数据区函数指针表补 413 种子会 ROM 溢出 2,474,764 B ⇒ 改 Tier3（≈9.6 KB）。见 §0.1–§0.3。性能优化中（2026-11-16：≈7.2 fps / 13.9% 实时）；2026-11-17 的 BG run 优化因画面异常整批回退，见 §0.4–§0.6；目标已由 60 fps 修正为 7→10 fps，见 §0.7–§0.8；11-17 逐步小改三组实测见 §0.9（6.7–7.3 fps 赛道 / 9.0 菜单）；11-17 16:29 加上虚拟手柄后，赛道 3.3–5.9 fps，见 §0.10；11-18 加入跳帧（隔帧渲染）并真机验收，render 3.46→1.7–2.1 s/60f，7.2→8.7–10.0 fps，见 §0.11（验收后已关闭开关，回到每帧基线以优化 disp）；11-18 访存探针实测：访存只占 `disp` 12–16%，瓶颈在 AOT 指令执行与 render，候选方案 A/B/C 已归档，见 §0.12–§0.14；当前执行 B（恢复 render 探针），每帧基线 7.7–8.3 fps；B 分段已出数（bg 占 render 56–77%、obj 其次）、B-1 八桶已实测（全段停留主界面：重 bg 路径 bg 76%、OBJ 路径两桶 49%），见 §0.15；B-2 已细分为 B-2a–d 并定回退纪律，B-2a（bg 按层细分探针）已烧录实测：标题/菜单/赛道三段分层数据出齐，bg 由 text 层主导，下一步 B-2c；赛道瓶颈已转为 `disp`（73%），见 §0.16；11-19 缓存/XIP 体检结案：I/D cache 与 MPU 全开、XIP 取指净 12 cyc ⇒ 缓存不是瓶颈，新增 `flush` 子桶探针（dma/recfg/devtick）待烧录，见 §0.16 |
 | Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 模板表去重） | 📋 候选已归档（见 §3.2.4）。2-D 未超限（ROM 余 353 KB），非阻塞；Tier3 已使补种子路线不再必要，是否实施待定 |
 | Phase 3 | 音频 / 按键 / 存档 | 🔄 进行中：**按键输入已跑通**（3.1 step 1–3 完成，2026-11-17 16:29 真机验证 Start/A/十字键均能驱动游戏）；音频与存档经决策暂不做，性能优化暂缓，见 §0.10 |
 
@@ -874,6 +874,60 @@ B-2 仍需先做 PC 端逐像素等价性验证。另需补两组日志：**按 
 **下一步候选**（按证据强度排序）：① 查 AOT 代码段与 guest RAM 的实际放置/缓存配置（link map + SF32 缓存设置），
 这是结论 6/7 的共同解释，改动可能只在配置/链接层；② 量 AOT 每指令开销（先做一次 `runtime_tick` 空转计时，
 区分「取指」与「tick 调用链」）；③ B-2c 降 bg（仅 2–4%）。Tier3 相关项全部关闭。
+
+**探针 ① 结案：缓存与 XIP 取指都是有效的（2026-11-19，`窗口1_COM14_(2026-11-19-16-46-21)_ui.log`）**
+
+开机体检（一次，`perf_report_mpu_cache` / `perf_bench_fetch`，`GBARECOMP_PERF_PROBES`）：
+
+```
+[gba] cache: I=1 D=1 mpu_en=1 | MAIR0 77004422 MAIR1 00000033
+[gba] fetch bench: call 20.06 cyc/iter, loop-only 8.03, net 12.03 (4013145 / 1607026 cyc)
+[gba] mem bench sram16K 14.0 | psram128K 71.5 | psram4K 13.5 cyc/read
+```
+
+- MPU 9 个区域与 SDK `mpu_config()` 的 `__WEAK` 默认完全一致：flash `attr0`(0x22)、片上 SRAM `attr1`(0x44)、
+  PSRAM `attr4`(0x33)；I-cache、D-cache、MPU 三个使能位全开。工程内无 `mpu_config()` 覆盖。
+- **`fetch bench` 是决定性的**：每次「调用 flash 里的小函数」净 12 cyc（call 20.06 − 空循环 8.03）。
+  若取指真是逐条裸 XIP 读（71 cyc 量级），200k 次不可能只有 3.2 M 周期 ⇒ **XIP 取指通路有效**。
+- 三条 mem bench 两次开机完全一致（14.0 / 71.5 / 13.5）：PSRAM 4 KiB 工作集 13.5 vs 128 KiB 71.5
+  ⇒ 数据侧缓存也在工作，只是命中率随工作集衰减。
+- **结论（否定 §0.16 结论 6/7 的「缓存没生效」解释）**：`memtot` 的 191–711 cyc/次 guest 访问、以及
+  每 guest 指令的高成本，不能再用「缓存配置错」解释，需从访存路径代码（区域分派/镜像/边界处理）和
+  每指令 `g_cpu.R[]` 读写本身找原因。
+- 保留口径：`fetch bench` 只证明 4 条指令的热循环能命中 I-cache，不能证明 13 MB `.text` 在派发跳跃下
+  miss 率也低；若后续要动代码放置，需另做「跨 128 KiB 代码的取指」基准。
+
+**菜单稳态按帧拆（同一日志 16:47:34 / 16:47:42 两个窗口，≈133 ms/帧 = 7.5 fps）**
+
+| 项 | ms/60f | ms/帧 | 占比 | 来源 |
+|---|---|---|---|---|
+| AOT 指令执行（`disp − mem − interp`） | 3 268 | 54.5 | 41% | 推导 |
+| bg r3（4bpp text） | 1 468 | 24.5 | 18% | `bgL` |
+| `flush − render` | 1 210 | 20.2 | 15% | `dispX` − `render` |
+| obj（winobj+scan+fill+out） | ~600 | 10 | 8% | `render2` |
+| mem 读写 | 700 | 11.7 | 9% | `memtot` |
+| bg r2 / prep / pres / halt 泵 | ~740 | 12 | 9% | 各桶 |
+
+`flush − render` 在四个窗口稳定为 1 110–1 221 ms/60f，不是单次噪声，是此前未归因的真实开销。
+
+**下一步变更点 1：`flush` 子桶（2026-11-19 已实现，待烧录）**
+
+- `third_party/.../runtime/runtime_bus_bridge.cpp`：新增 `g_flush_dma_cyc`（`run_timed_dma(2)/(1)` 两处）
+  与 `g_flush_recfg_cyc`（`recompute_event_budget`），都在 `GBARECOMP_PERF_PROBES` 内。
+- `src/gba_device.cpp`：`dispX` 行尾追加 `| dma <ms> recfg <ms> devtick <ms>`，其中
+  `devtick = flush − dma − recfg − render`（audio/timer/SIO/`ppu->tick` 的每事件开销），打印后清零。
+- 判读：若 `dma` 大 ⇒ 查 HDMA/VBlank DMA 的目的地（VRAM 在 PSRAM）；若 `devtick` 大 ⇒ 查
+  `ppu->tick` 与音频采样；若两者都小 ⇒ 差值落在探针未覆盖的 `mark_framebuffer_latched` 等短调用上。
+- 编译：`main.bin` 16,371,220 B，ROM 余 351,824 B，RAM 228,676 / 523,264 B。
+
+**日志清理（2026-11-19，本轮一并做掉）**
+
+- 删除 `[gba] mpu0..mpu8` 九行区域 dump（与 SDK 默认一致，已确认、无信息量），保留一行 `cache:` 摘要。
+- 删除 `mem bench` 三条与其 16 KiB 基准缓冲 `g_bench_sram`（两次结果完全一致，结论已入档；顺带 RAM 省 16 KB）。
+- 更早一轮已删除 `[gba] lcd 60f`（`main.c`）、`memrd2` / `memwr2` 两条。
+- 保留：`perf` / `render` / `render2` / `bgL` / `bgX` / `dispX` / `memrd` / `memwr` / `memtot` /
+  `fetch bench`（1 条、仅开机）与输入 `tp ev` / `pressed`（按键映射仍待补验 B/Select/L/R）。
+
 
 ## 1. 硬件确认（锁定）
 

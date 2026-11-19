@@ -148,18 +148,6 @@ static void gba_lcd_init(void)
  * there is no separate wait here (drv_lcd_fb_wait_write_done() would consume the
  * write-done event and make the next call block until its 100 ms timeout).
  */
-/* Temporary performance probe: DWT cycle counter, enabled by gba_device.cpp. */
-#if defined(GBARECOMP_PERF_PROBES)
-static inline uint32_t gba_perf_now(void)
-{
-    return *(volatile uint32_t *)0xE0001004u;
-}
-
-static uint32_t g_lcd_convert_cycles = 0;
-static uint32_t g_lcd_flush_cycles = 0;
-static uint32_t g_lcd_frames = 0;
-#endif
-
 void gba_lcd_present(const uint8_t *rgb888, uint32_t width, uint32_t height)
 {
     if ((rgb888 == NULL) || (width != GBA_WIDTH) || (height != GBA_HEIGHT))
@@ -167,9 +155,6 @@ void gba_lcd_present(const uint8_t *rgb888, uint32_t width, uint32_t height)
         return;     /* no scaler; wider PPU modes are not used on this build */
     }
 
-#if defined(GBARECOMP_PERF_PROBES)
-    const uint32_t t_convert = gba_perf_now();
-#endif
     uint16_t *dst = (uint16_t *)g_gba_fb;
     for (uint32_t i = 0; i < GBA_WIDTH * GBA_HEIGHT; i++)
     {
@@ -179,27 +164,7 @@ void gba_lcd_present(const uint8_t *rgb888, uint32_t width, uint32_t height)
         rgb888 += 3;
     }
 
-#if defined(GBARECOMP_PERF_PROBES)
-    const uint32_t t_flush = gba_perf_now();
-#endif
     drv_lcd_fb_write_send(&g_gba_area, &g_gba_area, g_gba_fb, NULL, 1);
-
-#if defined(GBARECOMP_PERF_PROBES)
-    const uint32_t t_done = gba_perf_now();
-
-    g_lcd_convert_cycles += t_flush - t_convert;
-    g_lcd_flush_cycles += t_done - t_flush;
-
-    /* 240 MHz: 240000 cycles per millisecond. */
-    if ((++g_lcd_frames % 60u) == 0u)
-    {
-        rt_kprintf("[gba] lcd 60f: convert %u ms, flush %u ms\n",
-                   (unsigned int)(g_lcd_convert_cycles / 240000u),
-                   (unsigned int)(g_lcd_flush_cycles / 240000u));
-        g_lcd_convert_cycles = 0;
-        g_lcd_flush_cycles = 0;
-    }
-#endif
 }
 
 #else

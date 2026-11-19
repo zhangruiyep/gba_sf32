@@ -115,6 +115,10 @@ extern unsigned g_interp_calls;
 extern unsigned long long g_interp_insns;
 extern unsigned long long g_flush_cyc;
 extern unsigned g_flush_calls;
+// Sub-buckets of `flush`: timed/HBlank DMA and the event-budget recompute. The
+// remainder (flush - dma - recfg - render) is the per-subsystem device tick.
+extern unsigned long long g_flush_dma_cyc;
+extern unsigned long long g_flush_recfg_cyc;
 }
 #endif
 
@@ -139,12 +143,14 @@ void perf_report(void)
     // scanline, so their sum is the whole render cost inside halt. winobj /
     // winrow are the two halves of the old `prep`; objscan / objfill are the
     // two halves of the old `obj`.
+    uint32_t render_total = 0;
     {
         uint32_t total = 0;
         for (unsigned int i = 0; i < 8u; ++i)
         {
             total += g_ppu_phase_cyc[i];
         }
+        render_total = total;
         rt_kprintf("[gba] render 60f: %u ms %u rows (%u cyc/row) | bg %u fgn %u out %u\n",
                    (unsigned int)to_ms(total), (unsigned int)g_ppu_phase_rows,
                    (unsigned int)(g_ppu_phase_rows != 0u ? total / g_ppu_phase_rows : 0u),
@@ -185,25 +191,35 @@ void perf_report(void)
         // the device-materialization block inside runtime_tick, which is where
         // scanline rendering happens when the guest never halts. `flush` also
         // contains the `bg`/`obj` buckets above; `disp` minus `interp`, `flush`
-        // and the memtot buckets is AOT instruction work.
-        rt_kprintf("[gba] dispX 60f: interp %u ms %u calls %u kinsns | flush %u ms %u\n",
-                   (unsigned int)to_ms(g_interp_cyc), (unsigned int)g_interp_calls,
-                   (unsigned int)(g_interp_insns / 1000u),
-                   (unsigned int)to_ms(g_flush_cyc), (unsigned int)g_flush_calls);
+        // and the memtot buckets is AOT instruction work. Inside `flush`, dma /
+        // recfg are timed directly and devtick is the remainder, i.e. the
+        // audio / timer / SIO / ppu->tick calls on every event boundary.
+        {
+            const uint64_t timed = g_flush_dma_cyc + g_flush_recfg_cyc + render_total;
+            const uint64_t dev_cyc = (g_flush_cyc > timed) ? (g_flush_cyc - timed) : 0u;
+            rt_kprintf("[gba] dispX 60f: interp %u ms %u calls %u kinsns | flush %u ms %u | dma %u recfg %u devtick %u\n",
+                       (unsigned int)to_ms(g_interp_cyc), (unsigned int)g_interp_calls,
+                       (unsigned int)(g_interp_insns / 1000u),
+                       (unsigned int)to_ms(g_flush_cyc), (unsigned int)g_flush_calls,
+                       (unsigned int)to_ms(g_flush_dma_cyc),
+                       (unsigned int)to_ms(g_flush_recfg_cyc),
+                       (unsigned int)to_ms(dev_cyc));
+        }
         g_interp_cyc = 0;
         g_interp_calls = 0;
         g_interp_insns = 0;
         g_flush_cyc = 0;
         g_flush_calls = 0;
+        g_flush_dma_cyc = 0;
+        g_flush_recfg_cyc = 0;
     }
 
     // Guest load/store split (see g_mem_prof_* in runtime_bus_bridge.cpp):
     // host ms / access count per GBA region. These buckets cover only the time
     // inside bus_read_*/bus_write_*; the rest of `disp` is AOT instruction
     // work, runtime_tick and IRQ entry. The final line divides the bucket
-    // cycles by the access count, so the average cost of a guest access
-    // (including the probe's own ~10 cycles) sits next to the 14 / 71 cyc
-    // random-read figures from `mem bench` above.
+    // cycles by the access count, so the average cost of a guest access sits
+    // next to the 12 cyc/call XIP fetch figure from `fetch bench` above.
     {
         uint32_t rd_cyc = 0;
         uint32_t wr_cyc = 0;
@@ -221,23 +237,11 @@ void perf_report(void)
                    (unsigned int)g_mem_prof_cnt[0][2], (unsigned int)to_ms(g_mem_prof_cyc[0][2]),
                    (unsigned int)g_mem_prof_cnt[0][7], (unsigned int)to_ms(g_mem_prof_cyc[0][7]),
                    (unsigned int)g_mem_prof_cnt[0][3], (unsigned int)to_ms(g_mem_prof_cyc[0][3]));
-        rt_kprintf("[gba] memrd2 60f: PAL %u/%u VRAM %u/%u OAM %u/%u BIOS %u/%u OTH %u/%u\n",
-                   (unsigned int)g_mem_prof_cnt[0][4], (unsigned int)to_ms(g_mem_prof_cyc[0][4]),
-                   (unsigned int)g_mem_prof_cnt[0][5], (unsigned int)to_ms(g_mem_prof_cyc[0][5]),
-                   (unsigned int)g_mem_prof_cnt[0][6], (unsigned int)to_ms(g_mem_prof_cyc[0][6]),
-                   (unsigned int)g_mem_prof_cnt[0][0], (unsigned int)to_ms(g_mem_prof_cyc[0][0]),
-                   (unsigned int)g_mem_prof_cnt[0][8], (unsigned int)to_ms(g_mem_prof_cyc[0][8]));
         rt_kprintf("[gba] memwr 60f: EWRAM %u/%u IWRAM %u/%u IO %u/%u VRAM %u/%u\n",
                    (unsigned int)g_mem_prof_cnt[1][1], (unsigned int)to_ms(g_mem_prof_cyc[1][1]),
                    (unsigned int)g_mem_prof_cnt[1][2], (unsigned int)to_ms(g_mem_prof_cyc[1][2]),
                    (unsigned int)g_mem_prof_cnt[1][3], (unsigned int)to_ms(g_mem_prof_cyc[1][3]),
                    (unsigned int)g_mem_prof_cnt[1][5], (unsigned int)to_ms(g_mem_prof_cyc[1][5]));
-        rt_kprintf("[gba] memwr2 60f: PAL %u/%u OAM %u/%u BIOS %u/%u ROM %u/%u OTH %u/%u\n",
-                   (unsigned int)g_mem_prof_cnt[1][4], (unsigned int)to_ms(g_mem_prof_cyc[1][4]),
-                   (unsigned int)g_mem_prof_cnt[1][6], (unsigned int)to_ms(g_mem_prof_cyc[1][6]),
-                   (unsigned int)g_mem_prof_cnt[1][0], (unsigned int)to_ms(g_mem_prof_cyc[1][0]),
-                   (unsigned int)g_mem_prof_cnt[1][7], (unsigned int)to_ms(g_mem_prof_cyc[1][7]),
-                   (unsigned int)g_mem_prof_cnt[1][8], (unsigned int)to_ms(g_mem_prof_cyc[1][8]));
         rt_kprintf("[gba] memtot 60f: read %u ms %u calls (%u cyc) | write %u ms %u calls (%u cyc)\n",
                    (unsigned int)to_ms(rd_cyc), (unsigned int)rd_cnt,
                    (unsigned int)(rd_cnt != 0u ? rd_cyc / rd_cnt : 0u),
@@ -263,42 +267,70 @@ void perf_report(void)
 #endif
 }
 
-// Temporary: random-read latency of on-chip SRAM vs the PSRAM arena. Every
-// index depends on the previous byte, so the loop measures full load latency
-// instead of overlapping loads. Windows are 16 KiB (SRAM) and 128 KiB (PSRAM):
-// a working data cache would drag the PSRAM figure down toward the SRAM one,
-// so this also tests whether a data cache is in effect at all.
 #if defined(GBARECOMP_PERF_PROBES)
-uint8_t g_bench_sram[16u * 1024u];
+namespace
+{
+__attribute__((noinline)) uint32_t fetch_bench_body(uint32_t x)
+{
+    return (x * 3u) ^ 0x5A5Au;
+}
+}  // namespace
 #endif
 
-void perf_bench_memory(const void *psram)
+// The first version of this probe summed into a plain local and printed only
+// the elapsed time, so GCC deleted the whole 200k-iteration loop (result unused,
+// body side-effect free) and the bench reported 2 cycles. The sink is volatile
+// now and printed, so the loop and the call have to happen.
+#if defined(GBARECOMP_PERF_PROBES)
+volatile uint32_t g_bench_fetch_sink = 0u;
+#endif
+
+// Temporary (plan §0.16): fetch-side check. Calls a tiny function that lives in
+// the NOR XIP image 200k times; the loop itself is XIP as well. With a working
+// I-cache the repeat fetch stays in cache, without one every fetch word is a
+// raw XIP read, which is the same stall the AOT'd guest code pays. The bare
+// loop is timed first so its cost can be subtracted from the call figure.
+void perf_bench_fetch(void)
 {
 #if defined(GBARECOMP_PERF_PROBES)
-    const uint8_t *area[2] = {g_bench_sram, (const uint8_t *)psram};
-    const uint32_t mask[2] = {(16u * 1024u) - 1u, (128u * 1024u) - 1u};
-    const char *name[2] = {"sram16K", "psram128K"};
-
-    for (unsigned int a = 0; a < 2u; ++a)
+    const uint32_t base_t0 = perf_now();
+    for (uint32_t i = 0; i < 200000u; ++i)
     {
-        const uint8_t *p = area[a];
-        uint32_t idx = 1u;
-        uint32_t sink = 0u;
-        const uint32_t t0 = perf_now();
-        for (uint32_t i = 0; i < 16384u; ++i)
-        {
-            sink += p[(idx ^ (idx >> 13)) & mask[a]];
-            idx = idx * 1103515245u + sink + 12345u;
-        }
-        const uint32_t dt = perf_now() - t0;
-        rt_kprintf("[gba] mem bench %s: %u cyc/16K reads = %u.%u cyc/read (%u)\n",
-                   name[a], (unsigned int)dt,
-                   (unsigned int)(dt / 16384u),
-                   (unsigned int)(((dt % 16384u) * 10u) / 16384u),
-                   (unsigned int)sink);
+        g_bench_fetch_sink += i;
     }
-#else
-    (void)psram;
+    const uint32_t base_dt = perf_now() - base_t0;
+
+    const uint32_t t0 = perf_now();
+    for (uint32_t i = 0; i < 200000u; ++i)
+    {
+        g_bench_fetch_sink += fetch_bench_body(i);
+    }
+    const uint32_t dt = perf_now() - t0;
+    rt_kprintf("[gba] fetch bench: call %u.%02u cyc/iter, loop-only %u.%02u, net %u.%02u (%u / %u cyc)\n",
+               (unsigned int)(dt / 200000u),
+               (unsigned int)(((dt % 200000u) * 100u) / 200000u),
+               (unsigned int)(base_dt / 200000u),
+               (unsigned int)(((base_dt % 200000u) * 100u) / 200000u),
+               (unsigned int)((dt - base_dt) / 200000u),
+               (unsigned int)(((dt - base_dt) % 200000u) * 100u / 200000u),
+               (unsigned int)dt, (unsigned int)base_dt);
+#endif
+}
+
+// Temporary (plan §0.16): dump the MPU/cache state that decides whether the XIP
+// image and the PSRAM arena can be cached at all. The cache enable bits alone
+// prove nothing: a region given a Device attribute is never cached, however
+// the cache is enabled.
+void perf_report_mpu_cache(void)
+{
+#if defined(GBARECOMP_PERF_PROBES)
+    const uint32_t ccr = *(volatile uint32_t *)(uintptr_t)0xE000ED14u;
+    const uint32_t ctrl = *(volatile uint32_t *)(uintptr_t)0xE000ED94u;
+    const uint32_t mair0 = *(volatile uint32_t *)(uintptr_t)0xE000EDC0u;
+    const uint32_t mair1 = *(volatile uint32_t *)(uintptr_t)0xE000EDC4u;
+    rt_kprintf("[gba] cache: I=%u D=%u mpu_en=%u | MAIR0 %08x MAIR1 %08x\n",
+               (unsigned int)((ccr >> 16) & 1u), (unsigned int)((ccr >> 17) & 1u),
+               (unsigned int)(ctrl & 1u), (unsigned int)mair0, (unsigned int)mair1);
 #endif
 }
 
@@ -503,14 +535,9 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     g_report_tick = rt_tick_get();
     g_report_cycle = perf_now();
 
-    // Temporary: SRAM vs PSRAM random-read latency, using the tail of the arena
-    // (past the machine objects) as the PSRAM window.
-#if defined(GBARECOMP_PERF_PROBES)
-    if (arena_bytes >= need + 15u + (128u * 1024u))
-    {
-        perf_bench_memory(reinterpret_cast<const void *>(base + need));
-    }
-#endif
+    // Temporary: is anything cached at all, and what does an XIP fetch cost?
+    perf_report_mpu_cache();
+    perf_bench_fetch();
 
 #if defined(GBARECOMP_FRAME_SKIP)
     rt_kprintf("[gba] frame skip: render every %u. guest frame\n",
