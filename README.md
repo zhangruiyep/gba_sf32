@@ -83,26 +83,11 @@ git apply patches/0001-gbarecomp-sf32-hsp-adaptations.patch
 3. 生成的文件必须**无 BOM**（首行是 `diff --git`），覆盖 `patches/0001-*.patch`；
 4. 回到仓库根确认 `git apply --reverse --check` 全绿后再提交。
 
-### 网络受限时的备用方案
-
-如果 `github.com` 直连不通，可改用 GitHub API + codeload（通常可达）：
-
-```bash
-# 1) 列出仓库树，读出子模块目录的 gitlink（或从 .gitmodules / 本表取 SHA）
-curl "https://api.github.com/repos/mstan/gbarecomp/git/trees/main?recursive=1"
-
-# 2) 按 commit 下载 tar 包并解压覆盖对应子模块目录
-curl -L "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>" -o sub.tar.gz
-```
-
-替换子模块后如果链接报错，**删掉整个构建目录重新 configure**（tar 解压会保留旧 mtime，ninja 会误判为 up-to-date）。
-
 ## 4. 编译
 
 ### 4.1 编译代码生成器 `gba_recompile`（Windows / MSVC）
 
-生成器是 CMake 工程（C++），不是 Rust CLI。需要 **VS 2022 Build Tools（MSVC）+ Ninja + CMake ≥ 3.30**
-（cmake 3.30 没有 "Visual Studio 18 2026" 生成器，所以用 Ninja + VS DevShell）。
+生成器是 CMake 工程，用 **VS 2022 Build Tools（MSVC）+ Ninja + CMake ≥ 3.30** 构建（Ninja 必须在 VS DevShell 里跑）。
 
 ```powershell
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -118,23 +103,16 @@ cmake -S $repo -B "$repo\build" -G Ninja `
 cmake --build "$repo\build" --target gba_recompile --parallel 16
 ```
 
-产物：`$repo\build\gba_recompile.exe`。
-
-改过 `arm_codegen.cpp` 等源码后，重建受影响的目标再重链即可：
+产物：`$repo\build\gba_recompile.exe`。改了 `src/` 或 `external/` 下的代码后按顺序重建 `gbarecomp_armv4t` 和 `gba_recompile`。
 
 ```powershell
 cmake --build "$repo\build" --target gbarecomp_armv4t --parallel 16
 cmake --build "$repo\build" --target gba_recompile --parallel 16
 ```
 
-**两个必踩的坑**：
-
-1. **必须加 `/utf-8`**。源码是 UTF-8 无 BOM，MSVC 默认按系统代码页解析，会把注释里的 `≥`/`≤` 解码错乱、吞掉后面的枚举名，报一堆 `error C2838: 'GE': illegal qualified name in member declaration`。
-2. **必须用 Ninja + VS DevShell**（见上面的生成器限制）。
-
 ### 4.2 交叉编译固件（目标板）
 
-SDK 与环境包的安装见思澈官方文档（[SDK 文档](https://docs.sifli.com/projects/sdk/latest/sf32lb52x/)）。装好后用 `set_env.bat gcc` 初始化 shell，在**本仓库根目录**执行：
+arm-none-eabi-gcc **14.2.1** + SCons **4.9.1**。SDK 安装见思澈官方文档（[SDK 文档](https://docs.sifli.com/projects/sdk/latest/sf32lb52x/)），用 `set_env.bat gcc` 初始化 shell 后在仓库根目录执行：
 
 ```powershell
 scons --board=sf32lb52-lchspi-ulp -j8
@@ -142,23 +120,7 @@ scons --board=sf32lb52-lchspi-ulp -j8
 
 产物在 `build_sf32lb52-lchspi-ulp_hcpu/`：`main.bin`、`bootloader/bootloader.bin`、`ftab/ftab.bin`。
 
-本项目实测版本：arm-none-eabi-gcc **14.2.1**、SCons **4.9.1**。
-
-单文件编译验证（不依赖 scons）：
-
-```powershell
-$env:Path = "<toolchain>\bin;" + $env:Path
-$repo = "<repo>\third_party\gbarecomp-main"
-$cart = "<repo>\out\cart_slim"
-$inc = @("-I$repo\src\armv4t","-I$repo\src\gba","-I$repo\src",
-         "-I$repo\external\arm-recomp-core\profiles\armv4t_gba","-I$cart")
-arm-none-eabi-g++ -std=c++20 -Os -mcpu=cortex-m33 -mthumb `
-  -fno-exceptions -fno-rtti -fno-threadsafe-statics `
-  -c "$cart\recompiled_000.cpp" @inc -o shard0.o
-arm-none-eabi-size -A shard0.o | Select-String "^\.text"
-```
-
-> **坑：scons 命令行里的工程路径盘符必须大写**（如 `E:` 而不是 `e:`）。小写会让 `customer/boards/SConscript` 的路径包含判断失效，board 源文件被重复加入，bootloader 链接报 `multiple definition of bsp_init`。
+> 坑：scons 命令行里的工程路径盘符必须大写（`E:` 而不是 `e:`），否则 board 源文件被重复加入，Bootloader 链接报 `multiple definition of bsp_init`。
 
 ## 5. 常用流程
 
@@ -182,37 +144,14 @@ $env:GBARECOMP_SLIM = "1"
 
 ## 6. 体积约束与瘦身开关 `GBARECOMP_SLIM`
 
-上游生成的代码为每条 guest 指令都插入 `if (runtime_should_yield()) return;` 和
-`if (g_runtime_insn_trace) runtime_insn_fp();`。4MB ROM 重编译后 Cortex-M33 `.text` 约 **16.2MB**，
-加 BIOS 与 runtime 超过 16MB NOR；降低优化等级无改善（`-Oz` 与 `-Os` 产出完全相同）。
+上游生成的代码为每条 guest 指令插入 yield 检查与 trace 回调。4MB ROM 重编译后 Cortex-M33 `.text` 约 **16.2MB**，加 BIOS 与 runtime 超过 16MB NOR；降低优化等级无效（`-Oz` 与 `-Os` 产出完全相同）。
 
-**改动**：`external/arm-recomp-core/profiles/armv4t_gba/arm_codegen.cpp` 新增 `slim_mode()`，
-把上述两条 emission 用 `if (!slim_mode()) { ... }` 包起来。控制流跳转仍会 `return` 回 dispatch
-循环，`runtime_tick()` 的周期记账保持不变，guest 时序不受影响。
-
-```cpp
-#ifndef GBARECOMP_SLIM
-#define GBARECOMP_SLIM 0
-#endif
-
-bool slim_mode() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("GBARECOMP_SLIM");
-        if (env != nullptr && *env != '\0') return std::atoi(env) != 0;
-        return GBARECOMP_SLIM != 0;
-    }();
-    return enabled;
-}
-```
-
-开关方式（默认关闭，关闭时输出与上游逐字节一致）：
+`GBARECOMP_SLIM` 打开后不再逐指令发射这两条，只在控制流跳转处抢占；`runtime_tick()` 周期记账不变，guest 时序不受影响。默认关闭，关闭时输出与上游逐字节一致。
 
 | 方式 | 用法 |
 |------|------|
 | 编译期宏 | 构建生成器时加 `-DGBARECOMP_SLIM=1`（如追加到 `CMAKE_CXX_FLAGS`） |
-| 运行期环境变量 | `$env:GBARECOMP_SLIM="1"`；`="0"` 可强制关闭（覆盖宏打开的情况） |
-
-**语义影响**：抢占粒度从"每指令"变成"每控制流跳转"，周期计数不变。
+| 运行期环境变量 | `$env:GBARECOMP_SLIM="1"`；`="0"` 强制关闭（覆盖宏打开的情况） |
 
 ### 6.1 实测体积分账（Mario Kart SC，4 MiB ROM）
 
