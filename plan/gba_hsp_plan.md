@@ -20,7 +20,7 @@
 
 **当前性能**（11-20，audio 静音后）：轻场景 7.0–8.2 s/60f（≈7.3–8.6 fps）；重场景（4 层 text BG 全屏 / WIN0+WIN1+OBJWIN）10.4 s/60f（≈5.8 fps，静音前 10.9–11.7 s）；赛道段 15.4–17.1 s/60f（**3.5–3.9 fps**，`disp` 占 65–74%）。目标已由 60 fps 修正为 **7 → 10 fps**——60 fps 在本平台不可达（天花板由 render 的 ≈89 ms/帧决定）。
 
-**本轮改动状态**（2026-11-20 17:03 固件）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支与 N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`，`Binary size 16,372,156 B`）均已上机：8bpp 层 C 1446 → 1046（−27.7%），4bpp 无回归；行级窗口 mask 在 `7f40` 实测不命中（收益全来自指针提升 + 零索引），原 25% 目标作废，详见 §5.2。`bgOP`/`bgctl`/`bgSeg`（新分母）/`bgRun` 探针同批生效。
+**本轮改动状态**（2026-11-20 17:03 固件）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支与 N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`，`Binary size 16,372,156 B`）均已上机：8bpp 层 C 1446 → 1046（−27.7%），4bpp 无回归；行级窗口 mask 在 `7f40` 实测不命中（收益全来自指针提升 + 零索引），原 25% 目标作废，详见 §5.2。`bgOP`/`bgctl`/`bgSeg`（新分母）/`bgRun` 探针同批生效。**新增 `haltX` 探针**（`halt` 内 flush / body / scan + 反推 `disp_flush`，`16,372,468 B`）待烧录，用于把 `halt` 与 `disp` 里的渲染时间分离。
 
 **烧录**：`build_sf32lb52-lchspi-ulp_hcpu/uart_download.bat`，串口 **COM14**（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000`。**约定由用户本人执行烧录**，AI 只编译并给出命令。
 
@@ -304,14 +304,15 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 
 - 17:08:33 进场过渡（`dispcnt 1f40`，无窗口，4 层 4bpp，r0 2,304,000 px 全不透明）：wall 7.70 s/60f，render 2890 ms（bg 1915，其中 r0 1659 ms = **173 cyc/px**），bgSeg r0 C=1270，objscan 仅 8。
 - 17:08:49 正式赛道（`dispcnt 3f40`，仅 WIN0）：wall **15.38 s/60f（3.9 fps）** = `disp` 9997（65%）+ `halt` 5155（33%）+ `pres` 181。`render` 4504 = `bg` 3170（r0 706 / r1 450 / r2 311 / r3 784）+ affine `a2` 892 + `out` 533 + `prep` 173；`disp` 内 AOT ≈3.6 s、`interp` 761（229 calls，65 kinsns）、`dma` 97；`memtot` 读 1009 + 写 442 = **1451 ms/60f（24 ms/帧、占总 wall 9%）**，为全日志最高。
-- 两处新观察：① `disp calls` 3358/60f（≈56 次/帧）与 `interp` 761 ms 都集中在含起跑特效的这一块，不能当作稳态基线；② `halt` 单泵成本 **232 µs**（5155 ms / 22,189 泵），而标题段只有 108 µs、其中 `devtick` 仅占 44 µs——差值疑与渲染后的 cache 压力相关，只记录，归到 N4 一并归因。
-- 结论：赛道段 `render` 已降到 29%，`disp` 内 AOT（23%）与 `halt`（33%）成为主体；`bg` 逐层 C 1219–1359，与旧赛道块 125–167 cyc/px 不同不可比（r0 覆盖率 851k vs 435k）。要抬赛道 fps 必须打 `disp`，继续压 `bg` 的收益已到个位数 ms/帧量级。
+- 两处新观察：① `disp calls` 3358/60f（≈56 次/帧）与 `interp` 761 ms 集中在含起跑特效的这一块，不能当稳态基线；② **`flush` 归属未定**——`render_scanline` 由 `tick_devices` 在 HBlank 事件里触发，落在哪个分支就记给哪个桶，所以 `halt` 5155 ms 里可能大半是 render，`disp` 9997 ms 里的 AOT 也未必是 ≈3.6 s。已加 `haltX` 探针（`halt` 内 flush 计时 + next-event 扫描计时 + 反推 `disp_flush`），见 N4。
+- 结论：赛道段可确定的只有 `render` 29%（4504 ms）与 `memtot` 9%；`disp`/`halt` 的 98% 拆分待 `haltX` 一次烧录定论。`bg` 逐层 C 1219–1359 与旧赛道块不可比（r0 覆盖率 851k vs 435k），继续压 `bg` 只剩个位数 ms/帧。
 
 **N4 过场 / 菜单帧劣化归因**（调查，先归因再决定是否动手）
 
 - 11-20 日志后段（08:49 起）`dispatch miss` 累计升至 1872，`disp calls` 197 → 2010–3358/60f，`interp` 757 ms/60f，wall 14–17 s。
 - 判据：同帧 `bgL` 里两层全屏 4bpp 各 ≈1,385 ms（≈144 cyc/px）说明是 **render 变重**；只有 `interp` 占比明显上升才是 Tier3 回退。两者处置完全不同。
-- 17:03 日志新增两条待归因项：① **`halt` 单泵成本随场景翻倍**（标题 108 µs/泵 → 赛道 232 µs/泵，泵数同为 2.2–3.0 万/60f），其中 `devtick` 只占 24–44 µs，余下 ≈90–190 µs 落在泵本体，需连「泵内非 devtick 时间」一起算；② **窗口开启本身的逐像素成本**：同工作量 4bpp 满不透明层 C 1239（`1e40`）→ 1457 / 1623（`7f40`），即 +27~48 cyc/px，这部分属 N3c 可打目标。
+- 17:03 日志新增两条待归因项：① **`flush` 落在 `halt` 还是 `disp` 未知**（`render_scanline` 在 `tick_devices` 的 HBlank 事件里触发），所以 `halt`/`disp` 不能直接读成「泵开销」/「AOT」。已加探针 `haltX 60f: flush / body / scan | disp_flush`（`src/gba_device.cpp`，每泵 3 次 DWT 读：next-event 扫描、`g_flush_cyc` 前后差、泵总时长；`disp_flush = flush − halt.flush`），固件 `16,372,468 B` 待烧录。② **窗口开启本身的逐像素成本**：同工作量 4bpp 满不透明层 C 1239（`1e40`）→ 1457 / 1623（`7f40`），即 +27~48 cyc/px，属 N3c 可打目标。
+- 判据（`haltX` 结果三分支）：A) `halt.flush` ≈ `render + devtick + dma` 且 `body` ≈ `scan` ≈ 几十 ms ⇒ 渲染是在 HALT 期间借道完成，赛道真实主体是 `disp` 里的 AOT ⇒ 立项 N5（寄存器提升）；B) `disp_flush` 数百 ms 以上、`body` 明显 >0 ⇒ `disp` 混入了渲染，先修账再谈优化；C) `body` 上千 ms 且与 `render` 无关 ⇒ 泵内确有大头（事件队列 / `runtime_tick` 记账），按桶继续细分。
 - 产出：一条归因结论。若确为回退主导，先算补种子会让派发表 + 代码各涨多少（NOR 只剩 343 KB），再决定是否立项。
 
 **N5 Phase 2-E E1 寄存器提升**（唯一能压 AOT ~42%，条件立项）

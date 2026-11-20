@@ -92,6 +92,12 @@ uint64_t g_halt_cycles = 0;
 uint32_t g_halt_pumps = 0;
 uint64_t g_present_cycles = 0;
 uint32_t g_present_count = 0;
+// N4 (plan §5.2): the HBlank-timed device flush (render + devtick + dma) runs
+// inside whichever branch is live when the scanline event fires, so `halt` is
+// not "pump overhead" and `disp` is not "AOT only" until the flush time is
+// subtracted from both. `scan` is the next-event probe at the top of the pump.
+uint64_t g_halt_flush_cycles = 0;
+uint64_t g_halt_scan_cycles = 0;
 uint32_t g_report_tick = 0;
 uint32_t g_report_cycle = 0;
 
@@ -150,6 +156,18 @@ void perf_report(void)
                (unsigned int)to_ms(g_dispatch_cycles), (unsigned int)g_dispatch_calls,
                (unsigned int)to_ms(g_halt_cycles), (unsigned int)g_halt_pumps,
                (unsigned int)to_ms(g_present_cycles), (unsigned int)g_present_count);
+
+    // N4: split `halt` / `disp` by the device flush that lands inside each.
+    {
+        const uint32_t halt_flush_ms = to_ms(g_halt_flush_cycles);
+        const uint32_t halt_ms = to_ms(g_halt_cycles);
+        const uint32_t disp_flush_ms = to_ms(g_flush_cyc - g_halt_flush_cycles);
+        rt_kprintf("[gba] haltX 60f: flush %u body %u scan %u | disp_flush %u\n",
+                   (unsigned int)halt_flush_ms,
+                   (unsigned int)(halt_ms > halt_flush_ms ? halt_ms - halt_flush_ms : 0u),
+                   (unsigned int)to_ms(g_halt_scan_cycles),
+                   (unsigned int)disp_flush_ms);
+    }
 
     // PPU render split. The eight buckets are consecutive slices of one
     // scanline, so their sum is the whole render cost inside halt. winobj /
@@ -359,6 +377,8 @@ void perf_report(void)
     g_dispatch_calls = 0;
     g_halt_cycles = 0;
     g_halt_pumps = 0;
+    g_halt_flush_cycles = 0;
+    g_halt_scan_cycles = 0;
     g_present_cycles = 0;
     g_present_count = 0;
 #endif
@@ -605,6 +625,10 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
             // continuation point would spin forever (the BIOS parks at 0x348
             // right before the cartridge hand-off). Mirror pump_idle() from the
             // host runner: advance to the next device event so VBlank vectors.
+            // N4: next-event probe (2-3 cycles_until_* calls).
+#if defined(GBARECOMP_PERF_PROBES)
+            const uint32_t halt_scan_start = perf_now();
+#endif
             uint32_t chunk = g_ppu->cycles_until_next_event();
             const uint32_t until_timer = g_bus->io().cycles_until_next_timer_event();
 #if !defined(GBARECOMP_AUDIO_MUTE)
@@ -624,7 +648,14 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
             {
                 chunk = 1u;
             }
+#if defined(GBARECOMP_PERF_PROBES)
+            g_halt_scan_cycles += perf_now() - halt_scan_start;
+            const uint64_t halt_flush_before = g_flush_cyc;
+#endif
             runtime_tick(chunk);
+#if defined(GBARECOMP_PERF_PROBES)
+            g_halt_flush_cycles += g_flush_cyc - halt_flush_before;
+#endif
             g_halt_cycles += perf_now() - step_start;
             ++g_halt_pumps;
         }
