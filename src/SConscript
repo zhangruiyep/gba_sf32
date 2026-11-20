@@ -62,6 +62,7 @@ else:
 #   PPU_DEFER_RGB        expand scanline colors to RGB888 once, at output
 #   PPU_LAZY_HUD_CLEAR   skip the unused foreign HUD row clear
 #   FRAME_SKIP           rasterize only every other guest frame
+#   AUDIO_MUTE           skip audio().tick and its event constraints
 #   PERF_PROBES          DWT frame-time probes (perf/memrd/memwr/lcd/mem bench)
 runtime_features = [
     'GBARECOMP_COMPACT_FRAMEBUFFER',
@@ -79,6 +80,7 @@ runtime_features = [
     'GBARECOMP_PPU_DEFER_RGB',
     'GBARECOMP_PPU_LAZY_HUD_CLEAR',
     'GBARECOMP_FRAME_SKIP',
+    'GBARECOMP_AUDIO_MUTE',
     'GBARECOMP_PERF_PROBES',
 ]
 

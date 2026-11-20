@@ -146,6 +146,17 @@ config GBARECOMP_FRAME_SKIP
       Measured on Mario Kart: render 3.46 s -> 1.7-2.1 s per 60 guest
       frames, ~7.2 -> 8.7-10.0 fps, panel at half the guest frame rate.
 
+config GBARECOMP_AUDIO_MUTE
+    bool "Mute the guest audio subsystem (skip all audio ticking)"
+    default n
+    help
+      Skip bus->audio().tick() and the audio sample-event constraint in the
+      device tick loop, and stop asking audio for its next event in the HALT
+      pump. Guest writes to the sound registers still land in the IO array,
+      but channel, FIFO and mixer state never advance, so nothing is
+      generated or mixed. Measured on Mario Kart: audio accounts for
+      386-404 ms per 60 guest frames, ~32% of devtick and ~3.5% of wall.
+
 config GBARECOMP_PERF_PROBES
     bool "Enable the DWT frame-time probes"
     default y

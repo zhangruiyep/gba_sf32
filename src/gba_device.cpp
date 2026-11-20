@@ -116,9 +116,13 @@ extern unsigned long long g_interp_insns;
 extern unsigned long long g_flush_cyc;
 extern unsigned g_flush_calls;
 // Sub-buckets of `flush`: timed/HBlank DMA and the event-budget recompute. The
-// remainder (flush - dma - recfg - render) is the per-subsystem device tick.
+// remainder (flush - dma - recfg - render) is the per-subsystem device tick,
+// split by the devX line into audio / timers+SIO / ppu->tick / loop rest.
 extern unsigned long long g_flush_dma_cyc;
 extern unsigned long long g_flush_recfg_cyc;
+extern unsigned long long g_dev_audio_cyc;
+extern unsigned long long g_dev_io_cyc;
+extern unsigned long long g_dev_ppu_cyc;
 }
 #endif
 
@@ -193,10 +197,13 @@ void perf_report(void)
         // contains the `bg`/`obj` buckets above; `disp` minus `interp`, `flush`
         // and the memtot buckets is AOT instruction work. Inside `flush`, dma /
         // recfg are timed directly and devtick is the remainder, i.e. the
-        // audio / timer / SIO / ppu->tick calls on every event boundary.
+        // audio / timer / SIO / ppu->tick calls on every event boundary. The
+        // devX line splits that remainder by subsystem; `rest` is the loop
+        // bookkeeping (cycles_until_* queries) plus vblank latch.
+        uint64_t dev_cyc = 0;
         {
             const uint64_t timed = g_flush_dma_cyc + g_flush_recfg_cyc + render_total;
-            const uint64_t dev_cyc = (g_flush_cyc > timed) ? (g_flush_cyc - timed) : 0u;
+            dev_cyc = (g_flush_cyc > timed) ? (g_flush_cyc - timed) : 0u;
             rt_kprintf("[gba] dispX 60f: interp %u ms %u calls %u kinsns | flush %u ms %u | dma %u recfg %u devtick %u\n",
                        (unsigned int)to_ms(g_interp_cyc), (unsigned int)g_interp_calls,
                        (unsigned int)(g_interp_insns / 1000u),
@@ -204,6 +211,14 @@ void perf_report(void)
                        (unsigned int)to_ms(g_flush_dma_cyc),
                        (unsigned int)to_ms(g_flush_recfg_cyc),
                        (unsigned int)to_ms(dev_cyc));
+            const uint64_t sub = g_dev_audio_cyc + g_dev_io_cyc + g_dev_ppu_cyc;
+            const uint64_t rest = (dev_cyc > sub) ? (dev_cyc - sub) : 0u;
+            rt_kprintf("[gba] devX 60f: tick %u ms | audio %u io %u ppu %u rest %u\n",
+                       (unsigned int)to_ms(dev_cyc),
+                       (unsigned int)to_ms(g_dev_audio_cyc),
+                       (unsigned int)to_ms(g_dev_io_cyc),
+                       (unsigned int)to_ms(g_dev_ppu_cyc),
+                       (unsigned int)to_ms(rest));
         }
         g_interp_cyc = 0;
         g_interp_calls = 0;
@@ -212,6 +227,9 @@ void perf_report(void)
         g_flush_calls = 0;
         g_flush_dma_cyc = 0;
         g_flush_recfg_cyc = 0;
+        g_dev_audio_cyc = 0;
+        g_dev_io_cyc = 0;
+        g_dev_ppu_cyc = 0;
     }
 
     // Guest load/store split (see g_mem_prof_* in runtime_bus_bridge.cpp):
@@ -543,6 +561,9 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     rt_kprintf("[gba] frame skip: render every %u. guest frame\n",
                (unsigned int)kRenderEvery);
 #endif
+#if defined(GBARECOMP_AUDIO_MUTE)
+    rt_kprintf("[gba] audio: muted, audio().tick is not called\n");
+#endif
     rt_kprintf("[gba] BIOS loaded, booting from reset vector %08x\n", g_cpu.R[15]);
 
     for (;;)
@@ -558,15 +579,19 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
             // host runner: advance to the next device event so VBlank vectors.
             uint32_t chunk = g_ppu->cycles_until_next_event();
             const uint32_t until_timer = g_bus->io().cycles_until_next_timer_event();
+#if !defined(GBARECOMP_AUDIO_MUTE)
             const uint32_t until_sample = g_bus->audio().cycles_until_next_shared_event();
+#endif
             if (until_timer < chunk)
             {
                 chunk = until_timer;
             }
+#if !defined(GBARECOMP_AUDIO_MUTE)
             if (until_sample < chunk)
             {
                 chunk = until_sample;
             }
+#endif
             if (chunk == 0u || chunk == 0xFFFFFFFFu)
             {
                 chunk = 1u;
