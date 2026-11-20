@@ -108,6 +108,14 @@ extern unsigned g_ppu_phase_rows;
 // Per-layer detail of the `bg` bucket: text BG0..BG3, affine BG2/BG3, bitmap.
 extern unsigned g_bg_phase_cyc[7];
 extern unsigned g_bg_phase_px[7];
+// Pixels that reached submit() per layer (non-transparent texels).
+extern unsigned g_bg_opaque_px[7];
+// N1: segment split of one 8-pixel BG run (0 map fetch / 1 tile fetch /
+// 2 pixel loop) and the run / skipped-run counts.
+extern unsigned g_bg_seg_cyc[7][3];
+extern unsigned g_bg_runs[7];
+extern unsigned g_bg_skip[7];
+extern void gba_ppu_bench_mem(unsigned *out);
 // `disp` breakdown (plan §0.16): Tier3 interpreter time (gba_device_stubs.cpp)
 // and the device-materialization flush inside runtime_tick (runtime_bus_bridge).
 extern unsigned long long g_interp_cyc;
@@ -184,10 +192,83 @@ void perf_report(void)
                    (unsigned int)to_ms(g_bg_phase_cyc[4]), (unsigned int)g_bg_phase_px[4],
                    (unsigned int)to_ms(g_bg_phase_cyc[5]), (unsigned int)g_bg_phase_px[5],
                    (unsigned int)to_ms(g_bg_phase_cyc[6]), (unsigned int)g_bg_phase_px[6]);
+        // Opaque pixels (index != 0) per layer. bgL counts every covered pixel,
+        // so bgOP/bgL is the layer's opacity: a high cyc/px on a sparse layer
+        // says nothing about the decode path, while a high cyc/opaque-px does.
+        rt_kprintf("[gba] bgOP 60f: r0 %u/%u r1 %u/%u r2 %u/%u r3 %u/%u (opaque/covered)\n",
+                   (unsigned int)g_bg_opaque_px[0], (unsigned int)g_bg_phase_px[0],
+                   (unsigned int)g_bg_opaque_px[1], (unsigned int)g_bg_phase_px[1],
+                   (unsigned int)g_bg_opaque_px[2], (unsigned int)g_bg_phase_px[2],
+                   (unsigned int)g_bg_opaque_px[3], (unsigned int)g_bg_phase_px[3]);
+        // N1 (plan §5.2): layer control registers next to bgL/bgOP, so the
+        // 4bpp-vs-8bpp, map size and mosaic flags of the expensive layer read
+        // straight off the same log block.
+        // BGCNT: [1:0] priority, [5:2] char base, [6] mosaic, [7] 8bpp,
+        // [12:8] map base, [13] overflow, [15:14] map size.
+        if (g_bus != nullptr)
+        {
+            gba::GbaIo& io = g_bus->io();
+            rt_kprintf("[gba] bgctl 60f: dispcnt %04x mosaic %04x | bg0 %04x bg1 %04x bg2 %04x bg3 %04x\n",
+                       (unsigned int)io.read16(0x000u), (unsigned int)io.read16(0x04Cu),
+                       (unsigned int)io.read16(0x008u), (unsigned int)io.read16(0x00Au),
+                       (unsigned int)io.read16(0x00Cu), (unsigned int)io.read16(0x00Eu));
+        }
         for (unsigned int i = 0; i < 7u; ++i)
         {
             g_bg_phase_cyc[i] = 0;
             g_bg_phase_px[i] = 0;
+            g_bg_opaque_px[i] = 0;
+        }
+
+        // N1 (plan §5.2): where the cost of one 8-pixel run goes. A/B are the
+        // two PSRAM reads of the run (BG-map entry, 4bpp tile word), C is the
+        // per-pixel palette lookup + submit. A/B accumulate on every entered
+        // run, so they divide by `runs`. C only accumulates on runs that reach
+        // the pixel loop (zero-tile and out-of-range runs `continue` early), so
+        // its denominator is `runs - skipped`; dividing by `runs` under-reported
+        // C by the skip ratio (e.g. 164 vs 1141 cyc/run on a 60%-skipped layer).
+        auto seg_ab = [](unsigned i, unsigned k) -> unsigned int {
+            return g_bg_runs[i] ? g_bg_seg_cyc[i][k] / g_bg_runs[i] : 0u;
+        };
+        auto seg_c = [](unsigned i) -> unsigned int {
+            const unsigned n = g_bg_runs[i] - g_bg_skip[i];
+            return n ? g_bg_seg_cyc[i][2] / n : 0u;
+        };
+        rt_kprintf("[gba] bgSeg 60f: r0 %u/%u/%u r1 %u/%u/%u r2 %u/%u/%u r3 %u/%u/%u (cyc/run: map tile px)\n",
+                   seg_ab(0, 0), seg_ab(0, 1), seg_c(0),
+                   seg_ab(1, 0), seg_ab(1, 1), seg_c(1),
+                   seg_ab(2, 0), seg_ab(2, 1), seg_c(2),
+                   seg_ab(3, 0), seg_ab(3, 1), seg_c(3));
+        // Runs that never reached the pixel loop (map offset out of range or an
+        // all-transparent 4bpp tile word). px/run above only counts real work.
+        rt_kprintf("[gba] bgRun 60f: r0 %u/%u r1 %u/%u r2 %u/%u r3 %u/%u (runs/skipped)\n",
+                   (unsigned int)g_bg_runs[0], (unsigned int)g_bg_skip[0],
+                   (unsigned int)g_bg_runs[1], (unsigned int)g_bg_skip[1],
+                   (unsigned int)g_bg_runs[2], (unsigned int)g_bg_skip[2],
+                   (unsigned int)g_bg_runs[3], (unsigned int)g_bg_skip[3]);
+        for (unsigned int i = 0; i < 7u; ++i)
+        {
+            g_bg_runs[i] = 0;
+            g_bg_skip[i] = 0;
+            for (unsigned int k = 0; k < 3u; ++k)
+            {
+                g_bg_seg_cyc[i][k] = 0;
+            }
+        }
+
+        // One-shot: cycles per access for the four memories the BG pixel loop
+        // touches. Runs after the first 60-frame window so the buffers exist.
+        static bool membench_done = false;
+        if (!membench_done)
+        {
+            unsigned int mb[4] = {0, 0, 0, 0};
+            gba_ppu_bench_mem(mb);
+            if (mb[0] != 0u || mb[1] != 0u)
+            {
+                membench_done = true;
+                rt_kprintf("[gba] membench: vram %u cyc/acc | pal(psram) %u | linepal(onchip) %u | cand r/w %u\n",
+                           mb[0], mb[1], mb[2], mb[3]);
+            }
         }
 
         // `disp` breakdown (plan §0.16): Tier3 time is a subset of `disp`
@@ -235,9 +316,7 @@ void perf_report(void)
     // Guest load/store split (see g_mem_prof_* in runtime_bus_bridge.cpp):
     // host ms / access count per GBA region. These buckets cover only the time
     // inside bus_read_*/bus_write_*; the rest of `disp` is AOT instruction
-    // work, runtime_tick and IRQ entry. The final line divides the bucket
-    // cycles by the access count, so the average cost of a guest access sits
-    // next to the 12 cyc/call XIP fetch figure from `fetch bench` above.
+    // work, runtime_tick and IRQ entry.
     {
         uint32_t rd_cyc = 0;
         uint32_t wr_cyc = 0;
@@ -282,56 +361,6 @@ void perf_report(void)
     g_halt_pumps = 0;
     g_present_cycles = 0;
     g_present_count = 0;
-#endif
-}
-
-#if defined(GBARECOMP_PERF_PROBES)
-namespace
-{
-__attribute__((noinline)) uint32_t fetch_bench_body(uint32_t x)
-{
-    return (x * 3u) ^ 0x5A5Au;
-}
-}  // namespace
-#endif
-
-// The first version of this probe summed into a plain local and printed only
-// the elapsed time, so GCC deleted the whole 200k-iteration loop (result unused,
-// body side-effect free) and the bench reported 2 cycles. The sink is volatile
-// now and printed, so the loop and the call have to happen.
-#if defined(GBARECOMP_PERF_PROBES)
-volatile uint32_t g_bench_fetch_sink = 0u;
-#endif
-
-// Temporary (plan §0.16): fetch-side check. Calls a tiny function that lives in
-// the NOR XIP image 200k times; the loop itself is XIP as well. With a working
-// I-cache the repeat fetch stays in cache, without one every fetch word is a
-// raw XIP read, which is the same stall the AOT'd guest code pays. The bare
-// loop is timed first so its cost can be subtracted from the call figure.
-void perf_bench_fetch(void)
-{
-#if defined(GBARECOMP_PERF_PROBES)
-    const uint32_t base_t0 = perf_now();
-    for (uint32_t i = 0; i < 200000u; ++i)
-    {
-        g_bench_fetch_sink += i;
-    }
-    const uint32_t base_dt = perf_now() - base_t0;
-
-    const uint32_t t0 = perf_now();
-    for (uint32_t i = 0; i < 200000u; ++i)
-    {
-        g_bench_fetch_sink += fetch_bench_body(i);
-    }
-    const uint32_t dt = perf_now() - t0;
-    rt_kprintf("[gba] fetch bench: call %u.%02u cyc/iter, loop-only %u.%02u, net %u.%02u (%u / %u cyc)\n",
-               (unsigned int)(dt / 200000u),
-               (unsigned int)(((dt % 200000u) * 100u) / 200000u),
-               (unsigned int)(base_dt / 200000u),
-               (unsigned int)(((base_dt % 200000u) * 100u) / 200000u),
-               (unsigned int)((dt - base_dt) / 200000u),
-               (unsigned int)(((dt - base_dt) % 200000u) * 100u / 200000u),
-               (unsigned int)dt, (unsigned int)base_dt);
 #endif
 }
 
@@ -553,9 +582,8 @@ extern "C" void gba_device_run(void *arena, unsigned int arena_bytes)
     g_report_tick = rt_tick_get();
     g_report_cycle = perf_now();
 
-    // Temporary: is anything cached at all, and what does an XIP fetch cost?
+    // Temporary: is anything cached at all?
     perf_report_mpu_cache();
-    perf_bench_fetch();
 
 #if defined(GBARECOMP_FRAME_SKIP)
     rt_kprintf("[gba] frame skip: render every %u. guest frame\n",

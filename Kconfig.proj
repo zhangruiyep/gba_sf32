@@ -87,13 +87,14 @@ config GBARECOMP_PPU_BG_RUN_BATCH
       where every pixel repeats the same map fetch.
 
 config GBARECOMP_PPU_BG_ZERO_RUN
-    bool "Skip fully transparent 4bpp BG tile runs"
+    bool "Skip fully transparent 4bpp / 8bpp BG tile runs"
     default y
     help
-      Read the four tile bytes of an 8-pixel 4bpp run with one 32-bit load.
-      When all four are zero every pixel of the run is color 0 and the
-      per-pixel loop would reject it, so the run is skipped as a whole and
-      the same word decodes the remaining runs from registers.
+      Read the four tile bytes of an 8-pixel 4bpp run with one 32-bit load
+      (eight bytes / two loads for an 8bpp run). When all of them are zero
+      every pixel of the run is color 0 and the per-pixel loop would reject
+      it, so the run is skipped as a whole; for 4bpp the same word decodes
+      the remaining runs from registers.
 
 config GBARECOMP_PPU_BG_RUN_SKIP
     bool "Skip BG tile runs already covered by a nearer candidate"
