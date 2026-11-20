@@ -243,8 +243,8 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 **风险**
 
 - `third_party/gbarecomp-main` 不受 git 管理（被 `.gitignore` 忽略），其改动只存在于工作区；动 `gba_ppu.cpp` 等文件前必须整体快照，否则无法精确回退。
-- `patches/0001-gbarecomp-sf32-hsp-adaptations.patch` 已与本地不同步（反向 apply 在 `runtime_bus_bridge.cpp:873` 失败），改 third_party 前须先重新导出。
-- 性能目标（7→10 fps）尚未覆盖最慢场景：主界面重 bg 态 wall 10.7–11.3 s/60f（≈5.4 fps），验收应以它为下限。
+- `patches/0001-gbarecomp-sf32-hsp-adaptations.patch` 为累计补丁（针对 `third_party/gbarecomp.tar.gz` 的 `src/` 子树），**11-20 已重新导出并 `git apply --reverse --check` 全绿**（覆盖 9 个文件，bridge 145 行 / ppu 379 行）。改 third_party 后须按 `tar 解压 → git diff --no-index --no-prefix a/… b/…` 重导并跑一次反向校验，否则补丁会再次失真。
+- 性能目标（7→10 fps）尚未覆盖最慢场景：主界面重 bg 态 wall 10.4 s/60f（≈5.7 fps，audio 静音后），验收应以它为下限。
 - 游戏 ROM > 8 MB 时 NOR 装不下，必须走 TF 卡按需加载（当前 4 MB 走全量读入 PSRAM 的简单路径）。
 - gbarecomp 对目标 ROM 覆盖率不足（fallback 太多）为中等风险，先用已重编译验证过的 P0/P1 游戏；manifest 反馈再补。
 - 已消除的旧风险：颜色格式色偏（present 里 RGB888→RGB565，多轮真机确认正常）；触摸手柄绘制/命中错位（命中判定复用 `gba_pad_draw()` 的 layout 常量）。

@@ -113,36 +113,6 @@ index 17a5b06..73c499a 100644
      return static_cast<uint16_t>((b << 10) | ((g6 >> 1) << 5) | r);
  }
  
-diff --git a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
-index 72ca9ec..da73969 100644
---- a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
-+++ b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
-@@ -25,6 +25,7 @@
- 
- #include "audio_shadow.h"
- #include "gba_m4a.h"
-+#include "psram_alloc.h"
- 
- namespace gba {
- 
-@@ -114,8 +115,15 @@ private:
-     uint64_t last_hook_cursor_ = 0;
-     uint8_t  reverb_ = 0;
-     uint8_t  dma_period_ = 7;
--    std::vector<std::pair<float, float>> ring_ =
--        std::vector<std::pair<float, float>>(kFrame * 16, {0.0f, 0.0f});
-+    // ~137 KB of delay history. With VRAM/OAM/palette bound to on-chip SRAM
-+    // the SRAM heap is only ~178 KB, so the default allocator returns NULL for
-+    // this vector and the zero-fill faults at address 0 during bring-up.
-+    // Serve it from the PSRAM arena, like GbaAudio's capture ring: it is
-+    // touched only on the shadow render path, once per grid sample.
-+    using RingSample = std::pair<float, float>;
-+    std::vector<RingSample, PsramAllocator<RingSample>> ring_ =
-+        std::vector<RingSample, PsramAllocator<RingSample>>(kFrame * 16,
-+                                                           {0.0f, 0.0f});
-     std::size_t ring_pos_ = 0;
-     ShadowVerifier vf_{};
-     uint8_t  count_mode_ = 0;
 diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
 index d9d1604..d2cf162 100644
 --- a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
@@ -953,8 +923,101 @@ index 69c2465..4b6c9ee 100644
      bool has_latched_fb_ = false;
  
      struct AffineLineState {
+diff --git a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
+index 72ca9ec..da73969 100644
+--- a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
++++ b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
+@@ -25,6 +25,7 @@
+ 
+ #include "audio_shadow.h"
+ #include "gba_m4a.h"
++#include "psram_alloc.h"
+ 
+ namespace gba {
+ 
+@@ -114,8 +115,15 @@ private:
+     uint64_t last_hook_cursor_ = 0;
+     uint8_t  reverb_ = 0;
+     uint8_t  dma_period_ = 7;
+-    std::vector<std::pair<float, float>> ring_ =
+-        std::vector<std::pair<float, float>>(kFrame * 16, {0.0f, 0.0f});
++    // ~137 KB of delay history. With VRAM/OAM/palette bound to on-chip SRAM
++    // the SRAM heap is only ~178 KB, so the default allocator returns NULL for
++    // this vector and the zero-fill faults at address 0 during bring-up.
++    // Serve it from the PSRAM arena, like GbaAudio's capture ring: it is
++    // touched only on the shadow render path, once per grid sample.
++    using RingSample = std::pair<float, float>;
++    std::vector<RingSample, PsramAllocator<RingSample>> ring_ =
++        std::vector<RingSample, PsramAllocator<RingSample>>(kFrame * 16,
++                                                           {0.0f, 0.0f});
+     std::size_t ring_pos_ = 0;
+     ShadowVerifier vf_{};
+     uint8_t  count_mode_ = 0;
+diff --git b/third_party/gbarecomp-main/src/gba/psram_alloc.h b/third_party/gbarecomp-main/src/gba/psram_alloc.h
+new file mode 100644
+index 0000000..73749bd
+--- /dev/null
++++ b/third_party/gbarecomp-main/src/gba/psram_alloc.h
+@@ -0,0 +1,57 @@
++// psram_alloc.h — allocator for large, low-traffic buffers.
++//
++// Bare-metal targets usually keep the RTOS heap in on-chip SRAM, which is far
++// too small for the observability buffers the runtime keeps around (the audio
++// capture ring alone is several MiB). With GBARECOMP_PSRAM_ALLOC those buffers
++// are served from the board's external PSRAM instead, while hot buffers stay
++// on the fast on-chip heap.
++
++#pragma once
++
++#include <cstddef>
++#include <memory>
++#include <new>
++
++#ifdef GBARECOMP_PSRAM_ALLOC
++
++extern "C" void *gba_psram_alloc(std::size_t size);
++extern "C" void  gba_psram_free(void *ptr);
++
++namespace gba {
++
++// Bump allocator over the device PSRAM arena. Blocks are handed out once at
++// bring-up and never returned, so deallocate() is a no-op.
++template <typename T>
++class PsramAllocator {
++public:
++    using value_type = T;
++
++    PsramAllocator() = default;
++    template <typename U>
++    PsramAllocator(const PsramAllocator<U>&) noexcept {}
++
++    T* allocate(std::size_t n) {
++        void* p = gba_psram_alloc(n * sizeof(T));
++        if (p == nullptr) throw std::bad_alloc();
++        return static_cast<T*>(p);
++    }
++    void deallocate(T* p, std::size_t) noexcept { gba_psram_free(p); }
++
++    template <typename U>
++    bool operator==(const PsramAllocator<U>&) const noexcept { return true; }
++    template <typename U>
++    bool operator!=(const PsramAllocator<U>&) const noexcept { return false; }
++};
++
++}  // namespace gba
++
++#else
++
++namespace gba {
++
++template <typename T>
++using PsramAllocator = std::allocator<T>;
++
++}  // namespace gba
++
++#endif  // GBARECOMP_PSRAM_ALLOC
 diff --git a/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp b/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
-index fa45091..76e6fac 100644
+index fa45091..19c7a0a 100644
 --- a/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
 +++ b/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
 @@ -30,7 +30,9 @@
@@ -1148,7 +1211,116 @@ index fa45091..76e6fac 100644
  }
  
  extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
-@@ -804,6 +873,16 @@ static void account_host_service_instructions(uint32_t count) {
+@@ -605,6 +674,22 @@ struct DeviceTickGuard {
+     ~DeviceTickGuard() { g_in_device_tick = prev; }
+ };
+ 
++#if defined(GBARECOMP_PERF_PROBES)
++// Sub-buckets of the device-materialization flush (plan §0.16). `flush` covers
++// tick_devices() plus the event-budget recompute, and the PPU render buckets
++// only cover the render_scanline() calls inside it. These two split off the
++// remaining suspects: timed/HBlank DMA and the per-flush bookkeeping.
++extern "C" unsigned long long g_flush_dma_cyc = 0;
++extern "C" unsigned long long g_flush_recfg_cyc = 0;
++// Second level: the `devtick` remainder (flush - dma - recfg - render),
++// split by subsystem. `ppu` is ppu->tick only; render_scanline is timed
++// separately by the PPU probes and is NOT part of that call.
++extern "C" unsigned long long g_dev_audio_cyc = 0;
++extern "C" unsigned long long g_dev_io_cyc = 0;    // tick_timers + tick_sio
++extern "C" unsigned long long g_dev_ppu_cyc = 0;
++static inline unsigned flush_probe_now(void) { return *(volatile unsigned *)0xE0001004u; }
++#endif
++
+ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+     DeviceTickGuard _dtg;
+     // Stage 2: materializing device state can raise IF, advance the PPU phase,
+@@ -614,23 +699,45 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+     uint32_t remaining = cycles;
+     while (remaining != 0) {
+         uint32_t chunk = remaining;
++#if !defined(GBARECOMP_AUDIO_MUTE)
+         uint32_t until_sample = bus->audio().cycles_until_next_shared_event();
++#endif
+         uint32_t until_timer = bus->io().cycles_until_next_timer_event();
+         uint32_t until_sio = bus->io().cycles_until_next_sio_event();
+         uint32_t until_ppu = ppu->cycles_until_next_event();
++#if !defined(GBARECOMP_AUDIO_MUTE)
+         if (until_sample < chunk) chunk = until_sample;
++#endif
+         if (until_timer < chunk) chunk = until_timer;
+         if (until_sio < chunk) chunk = until_sio;
+         if (until_ppu < chunk) chunk = until_ppu;
+         if (chunk == 0) chunk = 1;
+ 
++#if !defined(GBARECOMP_AUDIO_MUTE)
++#if defined(GBARECOMP_PERF_PROBES)
++        const unsigned _audio_t0 = flush_probe_now();
++#endif
+         GBA_DEVICE_PHASE(0,bus->audio().tick(chunk));
++#if defined(GBARECOMP_PERF_PROBES)
++        g_dev_audio_cyc += flush_probe_now() - _audio_t0;
++#endif
++#endif // !GBARECOMP_AUDIO_MUTE
++#if defined(GBARECOMP_PERF_PROBES)
++        const unsigned _io_t0 = flush_probe_now();
++#endif
+         GBA_DEVICE_PHASE(1,bus->io().tick_timers(chunk));
+         GBA_DEVICE_PHASE(2,bus->io().tick_sio(chunk));
++#if defined(GBARECOMP_PERF_PROBES)
++        g_dev_io_cyc += flush_probe_now() - _io_t0;
++        const unsigned _ppu_t0 = flush_probe_now();
++#endif
+ 
+         uint16_t vc_compare = static_cast<uint16_t>(
+             (bus->io().dispstat() >> 8) & 0xFFu);
+         auto events = GBA_DEVICE_PHASE(3,ppu->tick(chunk, vc_compare));
++#if defined(GBARECOMP_PERF_PROBES)
++        g_dev_ppu_cyc += flush_probe_now() - _ppu_t0;
++#endif
+         uint16_t ds = bus->io().dispstat();
+         if (events.hblank_started &&
+             ppu->vcount() < gba::GbaPpu::kLinesVisible) {
+@@ -658,12 +765,24 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+             // the DMA at HBlank N loads the register used by line N+1). This is
+             // what walks the per-scanline WIN0H circle table for the transition
+             // iris (MC-HP-003).
++#if defined(GBARECOMP_PERF_PROBES)
++            const unsigned _dma_t0 = flush_probe_now();
++#endif
+             GBA_DEVICE_PHASE(4,bus->io().run_timed_dma(2));
++#if defined(GBARECOMP_PERF_PROBES)
++            g_flush_dma_cyc += flush_probe_now() - _dma_t0;
++#endif
+         }
+         if (events.vblank_started) {
+             GBA_DEVICE_PHASE(5,ppu->mark_framebuffer_latched());
+             ++g_runtime_vblank_starts;
++#if defined(GBARECOMP_PERF_PROBES)
++            const unsigned _dma_t1 = flush_probe_now();
++#endif
+             GBA_DEVICE_PHASE(5,bus->io().run_timed_dma(1));   // VBlank-timed DMA
++#if defined(GBARECOMP_PERF_PROBES)
++            g_flush_dma_cyc += flush_probe_now() - _dma_t1;
++#endif
+             if (!g_session_execution && g_vblank_input_hook) g_vblank_input_hook();
+         }
+         if (!g_session_execution && events.frame_completed && g_frame_start_hook) {
+@@ -718,10 +837,14 @@ static long long          g_event_budget   = 0;
+ static inline void recompute_event_budget(gba::GbaBus* bus, gba::GbaPpu* ppu) {
+     uint32_t h  = ppu->cycles_until_next_event();
+     uint32_t ut = bus->io().cycles_until_next_timer_event();
++#if !defined(GBARECOMP_AUDIO_MUTE)
+     uint32_t us = bus->audio().cycles_until_next_shared_event();
++#endif
+     uint32_t usio = bus->io().cycles_until_next_sio_event();
+     if (ut < h) h = ut;
++#if !defined(GBARECOMP_AUDIO_MUTE)
+     if (us < h) h = us;
++#endif
+     if (usio < h) h = usio;
+     if (h == 0u) h = 1u;
+     g_event_budget = static_cast<long long>(h);
+@@ -804,6 +927,15 @@ static void account_host_service_instructions(uint32_t count) {
      }
  }
  
@@ -1159,13 +1331,12 @@ index fa45091..76e6fac 100644
 +// src/gba_device.cpp; the PPU `bg`/`obj` buckets are a subset of this block.
 +extern "C" unsigned long long g_flush_cyc = 0;
 +extern "C" unsigned g_flush_calls = 0;
-+static inline unsigned flush_probe_now(void) { return *(volatile unsigned *)0xE0001004u; }
 +#endif
 +
  extern "C" void runtime_tick(uint32_t cycles) {
      if (g_session_execution) { g_runtime_cycles += cycles; return; }
      // P6 shadow-tick: a healed shard's validation re-run only accumulates its
-@@ -830,9 +909,16 @@ extern "C" void runtime_tick(uint32_t cycles) {
+@@ -830,9 +962,22 @@ extern "C" void runtime_tick(uint32_t cycles) {
      g_pending_cycles += cycles;
      g_event_budget   -= static_cast<long long>(cycles);
      if (g_event_budget <= 0) {
@@ -1174,7 +1345,13 @@ index fa45091..76e6fac 100644
 +#endif
          tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
          g_pending_cycles = 0;
++#if defined(GBARECOMP_PERF_PROBES)
++        const unsigned recfg_t0 = flush_probe_now();
++#endif
          recompute_event_budget(bus, ppu);
++#if defined(GBARECOMP_PERF_PROBES)
++        g_flush_recfg_cyc += flush_probe_now() - recfg_t0;
++#endif
 +#if defined(GBARECOMP_PERF_PROBES)
 +        g_flush_cyc += flush_probe_now() - flush_t0;
 +        ++g_flush_calls;
@@ -1182,66 +1359,3 @@ index fa45091..76e6fac 100644
      }
  
      // A timed/FIFO DMA may have fired inside that flush; charge its stolen bus
-diff --git a/third_party/gbarecomp-main/src/gba/psram_alloc.h b/third_party/gbarecomp-main/src/gba/psram_alloc.h
-new file mode 100644
-index 0000000..73749bd
---- /dev/null
-+++ b/third_party/gbarecomp-main/src/gba/psram_alloc.h
-@@ -0,0 +1,57 @@
-+// psram_alloc.h — allocator for large, low-traffic buffers.
-+//
-+// Bare-metal targets usually keep the RTOS heap in on-chip SRAM, which is far
-+// too small for the observability buffers the runtime keeps around (the audio
-+// capture ring alone is several MiB). With GBARECOMP_PSRAM_ALLOC those buffers
-+// are served from the board's external PSRAM instead, while hot buffers stay
-+// on the fast on-chip heap.
-+
-+#pragma once
-+
-+#include <cstddef>
-+#include <memory>
-+#include <new>
-+
-+#ifdef GBARECOMP_PSRAM_ALLOC
-+
-+extern "C" void *gba_psram_alloc(std::size_t size);
-+extern "C" void  gba_psram_free(void *ptr);
-+
-+namespace gba {
-+
-+// Bump allocator over the device PSRAM arena. Blocks are handed out once at
-+// bring-up and never returned, so deallocate() is a no-op.
-+template <typename T>
-+class PsramAllocator {
-+public:
-+    using value_type = T;
-+
-+    PsramAllocator() = default;
-+    template <typename U>
-+    PsramAllocator(const PsramAllocator<U>&) noexcept {}
-+
-+    T* allocate(std::size_t n) {
-+        void* p = gba_psram_alloc(n * sizeof(T));
-+        if (p == nullptr) throw std::bad_alloc();
-+        return static_cast<T*>(p);
-+    }
-+    void deallocate(T* p, std::size_t) noexcept { gba_psram_free(p); }
-+
-+    template <typename U>
-+    bool operator==(const PsramAllocator<U>&) const noexcept { return true; }
-+    template <typename U>
-+    bool operator!=(const PsramAllocator<U>&) const noexcept { return false; }
-+};
-+
-+}  // namespace gba
-+
-+#else
-+
-+namespace gba {
-+
-+template <typename T>
-+using PsramAllocator = std::allocator<T>;
-+
-+}  // namespace gba
-+
-+#endif  // GBARECOMP_PSRAM_ALLOC
