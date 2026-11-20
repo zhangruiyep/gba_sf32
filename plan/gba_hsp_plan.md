@@ -16,11 +16,11 @@
 | Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch | ✅ 2026-11-13 出游戏画面；入口种子 `0x08000000`；9 个 miss PC 由 Tier3 自愈、累计 51 次后收敛，全程无 FATAL |
 | Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 去重） | 📋 候选归档，非阻塞（ROM 余 351 KB）；Tier3 已使补种子路线不再必要 |
 | Phase 3 | 音频 / 按键 / 存档 | 🔄 按键已跑通（触摸虚拟手柄 Start/A/十字键，11-17 验证）；音频与存档明确不做 |
-| Phase 4 | 性能优化 | 🔄 devtick 已收口（audio 静音，1258 → 728 ms/60f）；N1 探针已定论（C 段占 `bg` 78–90%），N3a（8bpp 零 run 跳过）已上机验证无回归，N3b 逐像素体瘦身已实现待上机，见 §5.2 |
+| Phase 4 | 性能优化 | 🔄 devtick 已收口（audio 静音，1258 → 728 ms/60f）；N1 探针已定论（C 段占 `bg` 78–90%），N3a（8bpp 零 run 跳过）、N3b（逐像素体瘦身，8bpp 层 C −27.7%）均已上机验证无回归，见 §5.2 |
 
-**当前性能**（11-20，audio 静音后）：轻场景 7.0–8.1 s/60f（≈7.4–8.6 fps）；重场景（4 层 text BG 全屏）10.4 s/60f（≈5.7 fps，静音前 10.9–11.7 s）；赛道段（4 层 4bpp + affine）17.1 s/60f（**3.5 fps**，`disp` 占 74%）。目标已由 60 fps 修正为 **7 → 10 fps**——60 fps 在本平台不可达（天花板由 render 的 ≈89 ms/帧决定）。
+**当前性能**（11-20，audio 静音后）：轻场景 7.0–8.2 s/60f（≈7.3–8.6 fps）；重场景（4 层 text BG 全屏 / WIN0+WIN1+OBJWIN）10.4 s/60f（≈5.8 fps，静音前 10.9–11.7 s）；赛道段 15.4–17.1 s/60f（**3.5–3.9 fps**，`disp` 占 65–74%）。目标已由 60 fps 修正为 **7 → 10 fps**——60 fps 在本平台不可达（天花板由 render 的 ≈89 ms/帧决定）。
 
-**本轮改动状态**（2026-11-20 14:02 固件起）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支已上机验证（`Binary size 16,372,260 B`）；`gba_device.cpp` 的 `bgOP`/`bgctl`/`bgSeg`（新分母）/`bgRun` 探针同批上机；N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`）已编译（`16,372,156 B`）待烧录，尚无回退需求。
+**本轮改动状态**（2026-11-20 17:03 固件）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支与 N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`，`Binary size 16,372,156 B`）均已上机：8bpp 层 C 1446 → 1046（−27.7%），4bpp 无回归；行级窗口 mask 在 `7f40` 实测不命中（收益全来自指针提升 + 零索引），原 25% 目标作废，详见 §5.2。`bgOP`/`bgctl`/`bgSeg`（新分母）/`bgRun` 探针同批生效。
 
 **烧录**：`build_sf32lb52-lchspi-ulp_hcpu/uart_download.bat`，串口 **COM14**（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000`。**约定由用户本人执行烧录**，AI 只编译并给出命令。
 
@@ -281,15 +281,15 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
   - 验收：`bgL r2` 与 `bgRun r2` 的 skip 数同步上升；画面逐像素一致；`bg` 总量下降与 r2 降幅吻合（≤0.5 ms 误差）。
   - 首测（14:02 日志）：① 赛道段（14:38 后）4 层全是 4bpp（`bg2 4d07`），**没有 8bpp 层 ⇒ N3a 在此场景不生效**；② 14:22 的 `dispcnt 7f40` 场景 `bg2 = 858a`（8bpp、93% 不透明、带透明边框），r2 的 skipped 从「改动前的 0」变为 **133,500/288,000（46%）**，按 4bpp 全透明 run 的 347 cyc/run 折算省 ≈3 ms/帧；③ 同步对照 4bpp 层 r0/r1/r3 的 C 为 125–167 cyc/px，与改动前同量级 ⇒ 无回归。因 skip 计数同时包含窗口跨度跳过，8bpp 零 tile 的精确收益只能靠「赛道无 8bpp」这一事实间接确认，不再另加探针。
 - **N3b 逐像素体瘦身**（低风险，位等价，N3a 之后单独烧）：① 在 run 循环前把 `vram` / `pal` / `g_row_top` / `g_row_second` / 窗口行指针提升为局部常量，消除闭包双重解引用；② 行级判定「本层整行窗口全开 / 整行混合全开」，命中时删掉逐像素 `layer_enabled()` / `blend_enabled()`；③ 透明索引判定前移，命中 `continue` 的路径最短化。
-  - 实现（2026-11-20，待烧录验证，开关 `GBARECOMP_PPU_BG_PIXEL_LEAN`）：① 在 `render_regular_bg` 内提升 `bg_vram` / `bg_pal` 两个局部 `const` 指针（lambda 按引用捕获外层，原来的每次使用都要先取闭包帧指针）；② `render_scanline_impl` 在 `row_control` 就绪后把整行 240 个字节 AND 成一个 `row_control_all`（仅 `any_window` 时执行，~0.3 ms/帧），`render_regular_bg` 据此得到 `layer_window_all` / `layer_blend_all`，逐像素 test 退化为常量比较；③ 8bpp 与 4bpp 都在调色板取数前先判 `pal_idx == 0` 直接 `continue`，4bpp 的 bank OR 也移到判定之后。`g_row_top` / `g_row_second` 未提升：批处理分支里只有关掉的 N3b-RUN_SKIP 会读它们。
+  - 实现（2026-11-20 已上机，开关 `GBARECOMP_PPU_BG_PIXEL_LEAN`）：① 在 `render_regular_bg` 内提升 `bg_vram` / `bg_pal` 两个局部 `const` 指针（lambda 按引用捕获外层，原来的每次使用都要先取闭包帧指针）；② `render_scanline_impl` 在 `row_control` 就绪后把整行 240 个字节 AND 成一个 `row_control_all`（仅 `any_window` 时执行，~0.3 ms/帧），`render_regular_bg` 据此得到 `layer_window_all` / `layer_blend_all`，逐像素 test 退化为常量比较；③ 8bpp 与 4bpp 都在调色板取数前先判 `pal_idx == 0` 直接 `continue`，4bpp 的 bank OR 也移到判定之后。`g_row_top` / `g_row_second` 未提升：批处理分支里只有关掉的 N3b-RUN_SKIP 会读它们。
   - 回退：`GBARECOMP_PPU_BG_PIXEL_LEAN=n` 即回到旧逐像素形式（`layer_window_all = layer_blend_all = no_window`），不动其他编译单元。
-  - 预期分场景：赛道段 `dispcnt 1f40` 的 bit13–15 全 0（无窗口），旧代码已靠 `no_window` 短路掉逐像素调用 ⇒ 该场景的增量只来自指针提升与零索引前移（估 10–20 cyc/px）；带窗口的 `7f40` 场景（WIN0/WIN1/OBJWIN 全开）才会真正吃到行级 mask，菜单/标题段收益最大。
+  - 预期分场景（实测未兑现，见首测③）：赛道段 `dispcnt 1f40` 的 bit13–15 全 0（无窗口），旧代码已靠 `no_window` 短路掉逐像素调用 ⇒ 该场景的增量只来自指针提升与零索引前移（估 10–20 cyc/px）；带窗口的 `7f40` 场景（WIN0/WIN1/OBJWIN 全开）本以为能吃到行级 mask，实际 `row_control_all` 恒不命中。
   - 编译：通过，`Binary size 16,372,156 B`（−104 B，对比 N3a 后 16,372,260 B）。
-  - 首测（17:03 日志）：① **8bpp 层同状态对比成立**——`dispcnt 1e40`、`bg2 858a`，`bgOP r2 1,149,360/1,236,000` 与 `bgRun r2 288,000/133,500` 与 14:02 日志完全一致（同一画面位置），`bgSeg r2` 的 C **1446 → 1046 cyc/run（−27.7%）**，该层 `bgL` **1089 → 839 ms/60f（−23%）**，211.5 → 162.9 cyc/px；② 4bpp 满不透明层（r3，2,304,000 px 全覆盖、100% 不透明）C **1334 → 1234（−7.5%）**、186.7 → 170.3 cyc/px，与「无窗口场景只能吃到指针提升 + 零索引」的预期下限吻合；③ 赛道段本日志只有两块 60f：17:08:33 是进场过渡（objscan 8），17:08:49 含起跑特效（interp 761 ms、dma 97 ms），`dispcnt 3f40` 仅开 WIN0，`row_control_all` 无整行命中，逐层 C 1219–1359、r3 176.6 cyc/px（旧赛道块 186.7），但 r0 覆盖率 851k vs 旧块 435k，不能直接归因。
-  - 结论：**N3b 通过、保留**；8bpp 收益显著，4bpp 小幅正收益，无回归。「整行窗口全开」路径本次无稳态样本（`7f40` 场景没跑到），25% 的目标留待下次带 WIN0/WIN1/OBJWIN 全开的画面确认。
+  - 首测（17:03 日志）：① **8bpp 层同状态对比成立**——`dispcnt 1e40`、`bg2 858a`，`bgOP r2 1,149,360/1,236,000` 与 `bgRun r2 288,000/133,500` 与 14:02 日志完全一致（同一画面位置），`bgSeg r2` 的 C **1446 → 1046 cyc/run（−27.7%）**，该层 `bgL` **1089 → 839 ms/60f（−23%）**，211.5 → 162.9 cyc/px。② 4bpp 满不透明层（r3，288,000 runs / 0 skip / 2,304,000 px 全覆盖全不透明）本次为 C=1239（`bgL` 1635 ms、170.3 cyc/px）；旧固件同场景值未留存（14:02 日志已删），只能定性判断无回归。③ **行级窗口 mask 在真实画面上没有命中**：`7f40`（WIN0+WIN1+OBJWIN 全开）本次跑到两块 60f（17:06:07 / 17:06:18），r3 的工作量与 ② 完全相同（288,000 runs / 0 skip / 2,304,000 px），C 反而升到 **1457 / 1623**（`bgL` 1898 / 2097 ms，197.7 / 218.4 cyc/px），8bpp r2 的 C 1046 → 1259 / 1414。机制：`row_control_all` 要求「该层在整行 240 px 都不被窗口裁掉」，真实画面总有部分列被裁 ⇒ `layer_window_all` 恒 false，逐像素 `layer_enabled()` 仍在，只多付 ≤240 次/行的 AND 汇总（≈0.3 ms/帧）。④ 赛道段本日志只有两块 60f：17:08:33 进场过渡（`1f40`、objscan 8），17:08:49 含起跑特效（`3f40` 仅开 WIN0、interp 761 ms、dma 97 ms），逐层 C 1219–1359；r0 覆盖率 851k vs 旧赛道块 435k，不可直接归因。
+  - 结论：**N3b 通过、保留**，但收益来源与立项预期不同——**全部来自指针提升 + 零索引前移**（8bpp 层 C −27.7%）；行级 mask 是「命中才赚、不命中不亏」的兜底，**原定「带窗口场景 ≥25%」在真实 ROM 内容上不可达，目标作废**。新验收口径：任何场景逐层 C 不劣于旧基线、逐像素零差异，透明像素多的层有正收益。继续压 per-pixel 只能走 N3c（`submit` 内联 / 候选结构 12 B → 8 B），不再在窗口判定上做文章。
   - 依据：反汇编 ~60 条指令/像素、每像素重复读指针；全透明路径 43 cyc/px 说明骨架本身就有压缩空间。
   - 预估：带窗口场景 C 从 152 → 90–110 cyc/px（`bg` 省 6–9 ms/帧）；无窗口的赛道段只看指针/零索引两项，预计 −10~15 cyc/px。
-  - 验收：同一路径 `bgL` 每层 cyc/px：带窗口场景下降 ≥25%、赛道段 ≥8%，逐像素比对零差异；不达标即整批回退（沿用 11-17 纪律）。
+  - 验收（17:03 首测后修正）：逐层 C 不劣于旧基线、逐像素比对零差异，8bpp/高透明层须有正收益。原「带窗口场景下降 ≥25%」不适用——行级 mask 在真实内容上不命中（见首测③）。
 - **N3c `submit` 内联 / 候选结构瘦身**（条件项，仅当 N3b 后 C 仍 >100 cyc/px）：`submit` 走 `[[gnu::always_inline]]` + 快路径只做 `top[x]` 比较；12 B 候选若压到 8 B 需重排 `PixelCandidate`，风险高，最后再议。
 
 **赛道段实测画像（14:02 日志，14:38 后稳态，驱动 N3/N5 的优先级）**
@@ -300,10 +300,18 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 - 三处与旧基线不同的结论：① 赛道段是 4 层 4bpp（`bg2 4d07`）+ affine BG2；② 最大项回到 AOT 派发（74%），render 只占 27%，`bg` 17%；③ `memtot` 30 ms/帧（490 cyc/call）、`devtick` 18 ms/帧，均高于 bg 单层成本。
 - 口径：N3b 若把 C 砍 35%，赛道段约省 9 ms/帧（+3% fps）；要把赛道 fps 拉起来必须回到 `disp`（N5）。
 
+**赛道段复测（17:03 日志，17:08:26 后，N3b 固件）**
+
+- 17:08:33 进场过渡（`dispcnt 1f40`，无窗口，4 层 4bpp，r0 2,304,000 px 全不透明）：wall 7.70 s/60f，render 2890 ms（bg 1915，其中 r0 1659 ms = **173 cyc/px**），bgSeg r0 C=1270，objscan 仅 8。
+- 17:08:49 正式赛道（`dispcnt 3f40`，仅 WIN0）：wall **15.38 s/60f（3.9 fps）** = `disp` 9997（65%）+ `halt` 5155（33%）+ `pres` 181。`render` 4504 = `bg` 3170（r0 706 / r1 450 / r2 311 / r3 784）+ affine `a2` 892 + `out` 533 + `prep` 173；`disp` 内 AOT ≈3.6 s、`interp` 761（229 calls，65 kinsns）、`dma` 97；`memtot` 读 1009 + 写 442 = **1451 ms/60f（24 ms/帧、占总 wall 9%）**，为全日志最高。
+- 两处新观察：① `disp calls` 3358/60f（≈56 次/帧）与 `interp` 761 ms 都集中在含起跑特效的这一块，不能当作稳态基线；② `halt` 单泵成本 **232 µs**（5155 ms / 22,189 泵），而标题段只有 108 µs、其中 `devtick` 仅占 44 µs——差值疑与渲染后的 cache 压力相关，只记录，归到 N4 一并归因。
+- 结论：赛道段 `render` 已降到 29%，`disp` 内 AOT（23%）与 `halt`（33%）成为主体；`bg` 逐层 C 1219–1359，与旧赛道块 125–167 cyc/px 不同不可比（r0 覆盖率 851k vs 435k）。要抬赛道 fps 必须打 `disp`，继续压 `bg` 的收益已到个位数 ms/帧量级。
+
 **N4 过场 / 菜单帧劣化归因**（调查，先归因再决定是否动手）
 
 - 11-20 日志后段（08:49 起）`dispatch miss` 累计升至 1872，`disp calls` 197 → 2010–3358/60f，`interp` 757 ms/60f，wall 14–17 s。
 - 判据：同帧 `bgL` 里两层全屏 4bpp 各 ≈1,385 ms（≈144 cyc/px）说明是 **render 变重**；只有 `interp` 占比明显上升才是 Tier3 回退。两者处置完全不同。
+- 17:03 日志新增两条待归因项：① **`halt` 单泵成本随场景翻倍**（标题 108 µs/泵 → 赛道 232 µs/泵，泵数同为 2.2–3.0 万/60f），其中 `devtick` 只占 24–44 µs，余下 ≈90–190 µs 落在泵本体，需连「泵内非 devtick 时间」一起算；② **窗口开启本身的逐像素成本**：同工作量 4bpp 满不透明层 C 1239（`1e40`）→ 1457 / 1623（`7f40`），即 +27~48 cyc/px，这部分属 N3c 可打目标。
 - 产出：一条归因结论。若确为回退主导，先算补种子会让派发表 + 代码各涨多少（NOR 只剩 343 KB），再决定是否立项。
 
 **N5 Phase 2-E E1 寄存器提升**（唯一能压 AOT ~42%，条件立项）
