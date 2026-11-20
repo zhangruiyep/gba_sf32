@@ -78,6 +78,17 @@ config GBARECOMP_PPU_ONCHIP_SCRATCH
       through the same 16 KiB D-Cache, so stack copies were being evicted
       and refetched from PSRAM.
 
+config GBARECOMP_PPU_BG_PIXEL_LEAN
+    bool "Lean BG per-pixel loop (N3b)"
+    default y
+    help
+      Hoist the vram/palette pointers out of the render_regular_bg lambda
+      frame, AND the whole window-control row once per scanline so a layer
+      (or the blend bit) enabled on every column drops its per-pixel
+      layer_enabled()/blend_enabled() test, and reject transparent color 0
+      before the palette load. Bit-identical to the previous loop; disabling
+      restores the per-pixel form.
+
 config GBARECOMP_PPU_BG_RUN_BATCH
     bool "Batch BG text sampling over 8-pixel tile runs"
     default y

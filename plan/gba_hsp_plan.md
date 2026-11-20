@@ -16,11 +16,11 @@
 | Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch | ✅ 2026-11-13 出游戏画面；入口种子 `0x08000000`；9 个 miss PC 由 Tier3 自愈、累计 51 次后收敛，全程无 FATAL |
 | Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 去重） | 📋 候选归档，非阻塞（ROM 余 351 KB）；Tier3 已使补种子路线不再必要 |
 | Phase 3 | 音频 / 按键 / 存档 | 🔄 按键已跑通（触摸虚拟手柄 Start/A/十字键，11-17 验证）；音频与存档明确不做 |
-| Phase 4 | 性能优化 | 🔄 devtick 已收口（audio 静音，1258 → 728 ms/60f）；N1 探针已定论（C 段占 `bg` 78–90%），N3a（8bpp 零 run 跳过）已上机验证无回归，下一步 N3b 逐像素体瘦身，见 §5.2 |
+| Phase 4 | 性能优化 | 🔄 devtick 已收口（audio 静音，1258 → 728 ms/60f）；N1 探针已定论（C 段占 `bg` 78–90%），N3a（8bpp 零 run 跳过）已上机验证无回归，N3b 逐像素体瘦身已实现待上机，见 §5.2 |
 
 **当前性能**（11-20，audio 静音后）：轻场景 7.0–8.1 s/60f（≈7.4–8.6 fps）；重场景（4 层 text BG 全屏）10.4 s/60f（≈5.7 fps，静音前 10.9–11.7 s）；赛道段（4 层 4bpp + affine）17.1 s/60f（**3.5 fps**，`disp` 占 74%）。目标已由 60 fps 修正为 **7 → 10 fps**——60 fps 在本平台不可达（天花板由 render 的 ≈89 ms/帧决定）。
 
-**本轮改动状态**（2026-11-20 14:02 固件起）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支、`gba_device.cpp` 的 `bgOP`/`bgctl`/`bgSeg`（新分母）/`bgRun` 探针、`Kconfig.proj` 的 ZERO_RUN 说明，均已编译并上机（`Binary size 16,372,260 B`），尚无回退需求。
+**本轮改动状态**（2026-11-20 14:02 固件起）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支已上机验证（`Binary size 16,372,260 B`）；`gba_device.cpp` 的 `bgOP`/`bgctl`/`bgSeg`（新分母）/`bgRun` 探针同批上机；N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`）已编译（`16,372,156 B`）待烧录，尚无回退需求。
 
 **烧录**：`build_sf32lb52-lchspi-ulp_hcpu/uart_download.bat`，串口 **COM14**（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000`。**约定由用户本人执行烧录**，AI 只编译并给出命令。
 
@@ -281,9 +281,13 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
   - 验收：`bgL r2` 与 `bgRun r2` 的 skip 数同步上升；画面逐像素一致；`bg` 总量下降与 r2 降幅吻合（≤0.5 ms 误差）。
   - 首测（14:02 日志）：① 赛道段（14:38 后）4 层全是 4bpp（`bg2 4d07`），**没有 8bpp 层 ⇒ N3a 在此场景不生效**；② 14:22 的 `dispcnt 7f40` 场景 `bg2 = 858a`（8bpp、93% 不透明、带透明边框），r2 的 skipped 从「改动前的 0」变为 **133,500/288,000（46%）**，按 4bpp 全透明 run 的 347 cyc/run 折算省 ≈3 ms/帧；③ 同步对照 4bpp 层 r0/r1/r3 的 C 为 125–167 cyc/px，与改动前同量级 ⇒ 无回归。因 skip 计数同时包含窗口跨度跳过，8bpp 零 tile 的精确收益只能靠「赛道无 8bpp」这一事实间接确认，不再另加探针。
 - **N3b 逐像素体瘦身**（低风险，位等价，N3a 之后单独烧）：① 在 run 循环前把 `vram` / `pal` / `g_row_top` / `g_row_second` / 窗口行指针提升为局部常量，消除闭包双重解引用；② 行级判定「本层整行窗口全开 / 整行混合全开」，命中时删掉逐像素 `layer_enabled()` / `blend_enabled()`；③ 透明索引判定前移，命中 `continue` 的路径最短化。
+  - 实现（2026-11-20，待烧录验证，开关 `GBARECOMP_PPU_BG_PIXEL_LEAN`）：① 在 `render_regular_bg` 内提升 `bg_vram` / `bg_pal` 两个局部 `const` 指针（lambda 按引用捕获外层，原来的每次使用都要先取闭包帧指针）；② `render_scanline_impl` 在 `row_control` 就绪后把整行 240 个字节 AND 成一个 `row_control_all`（仅 `any_window` 时执行，~0.3 ms/帧），`render_regular_bg` 据此得到 `layer_window_all` / `layer_blend_all`，逐像素 test 退化为常量比较；③ 8bpp 与 4bpp 都在调色板取数前先判 `pal_idx == 0` 直接 `continue`，4bpp 的 bank OR 也移到判定之后。`g_row_top` / `g_row_second` 未提升：批处理分支里只有关掉的 N3b-RUN_SKIP 会读它们。
+  - 回退：`GBARECOMP_PPU_BG_PIXEL_LEAN=n` 即回到旧逐像素形式（`layer_window_all = layer_blend_all = no_window`），不动其他编译单元。
+  - 预期分场景：赛道段 `dispcnt 1f40` 的 bit13–15 全 0（无窗口），旧代码已靠 `no_window` 短路掉逐像素调用 ⇒ 该场景的增量只来自指针提升与零索引前移（估 10–20 cyc/px）；带窗口的 `7f40` 场景（WIN0/WIN1/OBJWIN 全开）才会真正吃到行级 mask，菜单/标题段收益最大。
+  - 编译：通过，`Binary size 16,372,156 B`（−104 B，对比 N3a 后 16,372,260 B）。
   - 依据：反汇编 ~60 条指令/像素、每像素重复读指针；全透明路径 43 cyc/px 说明骨架本身就有压缩空间。
-  - 预估：C 从 152 → 90–110 cyc/px，`bg` 33.5 → ≈24–27 ms/帧（省 6–9 ms/帧）。
-  - 验收：同一路径 `bgL` 每层 cyc/px 下降 ≥25%，逐像素比对零差异；不达标即整批回退（沿用 11-17 纪律）。
+  - 预估：带窗口场景 C 从 152 → 90–110 cyc/px（`bg` 省 6–9 ms/帧）；无窗口的赛道段只看指针/零索引两项，预计 −10~15 cyc/px。
+  - 验收：同一路径 `bgL` 每层 cyc/px：带窗口场景下降 ≥25%、赛道段 ≥8%，逐像素比对零差异；不达标即整批回退（沿用 11-17 纪律）。
 - **N3c `submit` 内联 / 候选结构瘦身**（条件项，仅当 N3b 后 C 仍 >100 cyc/px）：`submit` 走 `[[gnu::always_inline]]` + 快路径只做 `top[x]` 比较；12 B 候选若压到 8 B 需重排 `PixelCandidate`，风险高，最后再议。
 
 **赛道段实测画像（14:02 日志，14:38 后稳态，驱动 N3/N5 的优先级）**
