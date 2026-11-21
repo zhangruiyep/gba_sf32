@@ -169,6 +169,18 @@ config GBARECOMP_AUDIO_MUTE
       generated or mixed. Measured on Mario Kart: audio accounts for
       386-404 ms per 60 guest frames, ~32% of devtick and ~3.5% of wall.
 
+config GBARECOMP_BUS_FASTPATH
+    bool "Short-circuit the AOT load/store bridge for RAM and ROM"
+    default y
+    help
+      Guest loads/stores to EWRAM, IWRAM and cartridge ROM need neither the
+      lazy-MMIO catch-up, the BIOS-access PC latch, the host read override nor
+      the unmapped-read trace, yet every AOT instruction pays for all of them
+      (the memrd/memwr counters put 1.82 s of the 10.4 s AOT time per 60 track
+      frames inside bus_read_*/bus_write_*). Those regions now return straight
+      from the backing array; the cartridge GPIO window, BIOS, MMIO, VRAM/OAM,
+      save/flash and open-bus keep the general path. Toggle off to restore it.
+
 config GBARECOMP_PERF_PROBES
     bool "Enable the DWT frame-time probes"
     default y

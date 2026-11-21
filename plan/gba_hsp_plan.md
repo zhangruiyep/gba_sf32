@@ -20,7 +20,7 @@
 
 **当前性能**（11-21 `haltX` 口径）：轻场景 7.0–8.2 s/60f（≈7.3–8.6 fps）；重场景（4 层 text BG 全屏 / WIN0+WIN1+OBJWIN）10.4 s/60f（≈5.8 fps，静音前 10.9–11.7 s）；赛道段 15.7–17.1 s/60f（**3.5–3.8 fps**），构成为 **AOT 61% / render 27% / devtick 6% / pres 1%**。目标已由 60 fps 修正为 **7 → 10 fps**——60 fps 在本平台不可达（天花板由 render 的 ≈89 ms/帧决定）。
 
-**本轮改动状态**（2026-11-21 10:06 固件）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支与 N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`，`Binary size 16,372,156 B`）均已上机：8bpp 层 C 1446 → 1046（−27.7%），4bpp 无回归；行级窗口 mask 在 `7f40` 实测不命中（收益全来自指针提升 + 零索引），原 25% 目标作废，详见 §5.2。`haltX` 探针（`16,372,468 B`）已上机并定论：赛道 `halt` 的 33% 是 render 借道，泵本体 `body` 仅 3.5% wall、`scan` 0.05% ⇒ **N2 取消、N5 转正**，详见 §5.2。随后尝试的 `GBARECOMP_AOT_INLINE_FLAGS`（`cpsr_*`/`arm_set_nz*` 强制内联）链接溢出 1,577,852 B，已完整回退（Kconfig.proj / SConscript / runtime_arm.h / runtime_arm.cpp），工作区回到 `7e6c1b5` + 基线固件 `16,372,468 B`；结论已写入 N5 段。
+**本轮改动状态**（2026-11-21 10:06 固件）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支与 N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`，`Binary size 16,372,156 B`）均已上机：8bpp 层 C 1446 → 1046（−27.7%），4bpp 无回归；行级窗口 mask 在 `7f40` 实测不命中（收益全来自指针提升 + 零索引），原 25% 目标作废，详见 §5.2。`haltX` 探针（`16,372,468 B`）已上机并定论：赛道 `halt` 的 33% 是 render 借道，泵本体 `body` 仅 3.5% wall、`scan` 0.05% ⇒ **N2 取消、N5 转正**，详见 §5.2。随后尝试的 `GBARECOMP_AOT_INLINE_FLAGS`（`cpsr_*`/`arm_set_nz*` 强制内联）链接溢出 1,577,852 B，已完整回退（Kconfig.proj / SConscript / runtime_arm.h / runtime_arm.cpp），工作区回到 `7e6c1b5` + 基线固件 `16,372,468 B`；结论已写入 N5 段。当前待上机固件 `16,372,988 B`：N5 第 1 步 `GBARECOMP_BUS_FASTPATH`（RAM/ROM 访存入口短路），详见 §5.2。
 
 **烧录**：`build_sf32lb52-lchspi-ulp_hcpu/uart_download.bat`，串口 **COM14**（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000`。**约定由用户本人执行烧录**，AI 只编译并给出命令。
 
@@ -337,6 +337,7 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 - 目标（修正）：只改**被调用函数内部**（调用点代码体积不增），在 300–400 cyc/指令 上砍 20–30%；赛道 AOT ≈174 ms/帧 ⇒ 目标 ≈120–140 ms/帧（+0.6–0.9 fps）。
 - 拆步（按收益/风险排序，一次只烧一处，各自独立宏开关）：
   1. **`bus_read_*/bus_write_*` 入口短路**（低风险、收益最确定）：`memtot` 占 AOT 17.5%（1.82 s/60f，即 ≈30 ms/帧），砍入口的 IO 判定 / trace / resync 固定开销；不碰 codegen，不动 ROM 体积。
+     **✅ 已实现（2026-11-21，开关 `GBARECOMP_BUS_FASTPATH`，待上机）**：搬进 [`runtime_bus_bridge.cpp`](../third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp) 的 6 个 `bus_read_u8/u16/u32`、`bus_write_u8/u16/u32` 入口。EWRAM/IWRAM/ROM（0x08–0x0D，含 4 MB 以上的镜像）直接走 `read_memory` / `write_memory` + epoch，跳过 `is_io_addr`/`is_idle_safe_read` 双判、`note_mmio_read`、`sync_bios_access`（2 次 store）、`apply_bus_read_override`、`trace_unmapped_read`（out-of-line 调用）以及写侧的 `runtime_resync_horizon`。位等价前提：①GPIO 窗口 0x0C0–0x0CB 留在慢路径；②BIOS（`addr < 0x4000`）留在慢路径（`bios_access_enabled_` 依赖 PC 锁存）；③`g_runtime_bus_read_override` 非空时整体回退慢路径；④写路径 epoch 自增顺序不变。ROM 读不消费 `open_bus_pc_`（`gba_bus.cpp` ROM 分支只用 `matrix_`/`rom_`/GPIO），故跳过 `note_pc` 安全。构建验证：`Binary size 16,372,988 B`（+520 B），ROM 余量 ~343 KB 不变。预期收益上限 ≈ memtot 的份额，实测以 `memrd`/`memwr` 与赛道 fps 为准。
   2. **`runtime_tick` 内部瘦身**（低中风险）：现状每指令都做 `g_host_service_hook` 检查、`cyc_probe` 记账、`drain_dma_steal`、IRQ 判定；改成慢路径外置 / 预算窗口内批量，函数体积可持平。
   3. **codegen 去掉冗余 `R[15]` 存储**（中风险，能换 ROM 余量）：每 guest 指令前后各写一次 `g_cpu.R[15]`，可由 codegen 只在分支/异常边界写；需重新生成 ROM 并对拍，**先减体积再谈其它 codegen 改动**。
   4. 若 1–3 仍不足，才考虑寄存器分配式 codegen（需先腾出至少 1 MB ROM 余量，或同步做 E2 派发表压缩）。
