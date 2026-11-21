@@ -181,6 +181,18 @@ config GBARECOMP_BUS_FASTPATH
       from the backing array; the cartridge GPIO window, BIOS, MMIO, VRAM/OAM,
       save/flash and open-bus keep the general path. Toggle off to restore it.
 
+config GBARECOMP_TICK_LEAN
+    bool "Trim the per-instruction runtime_tick fast path"
+    default y
+    help
+      runtime_tick runs once per guest instruction and its fast path costs
+      ~50 instructions / 3 out-of-line calls. This drops the cyc-probe call
+      (environment-gated diagnostic, off on device), tests the DMA-steal
+      counter inline instead of entering drain_dma_steal(), and reads
+      IE/IF/IME inline instead of calling GbaIo::irq_pending(). All three are
+      bit-identical to the general path; only the call overhead goes away.
+      Toggle off to restore it.
+
 config GBARECOMP_PERF_PROBES
     bool "Enable the DWT frame-time probes"
     default y

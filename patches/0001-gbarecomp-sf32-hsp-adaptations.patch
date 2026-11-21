@@ -113,6 +113,60 @@ index 17a5b06..73c499a 100644
      return static_cast<uint16_t>((b << 10) | ((g6 >> 1) << 5) | r);
  }
  
+diff --git a/third_party/gbarecomp-main/src/gba/gba_io.h b/third_party/gbarecomp-main/src/gba/gba_io.h
+index 235a4e3..7453d77 100644
+--- a/third_party/gbarecomp-main/src/gba/gba_io.h
++++ b/third_party/gbarecomp-main/src/gba/gba_io.h
+@@ -153,6 +153,19 @@ public:
+     // happens at the call site.
+     bool irq_pending() const;
+ 
++    // Same predicate as irq_pending(), defined inline for the per-guest-
++    // instruction runtime_tick check (GBARECOMP_TICK_LEAN), which cannot
++    // afford an out-of-line call. IE/IF/IME are plain LE byte pairs in io_.
++    bool irq_pending_inline() const {
++        const uint16_t ie_v = static_cast<uint16_t>(
++            io_[IoReg::IE] | (io_[IoReg::IE + 1] << 8));
++        const uint16_t if_v = static_cast<uint16_t>(
++            io_[IoReg::IF] | (io_[IoReg::IF + 1] << 8));
++        if ((ie_v & if_v) == 0) return false;
++        return (static_cast<uint16_t>(
++                    io_[IoReg::IME] | (io_[IoReg::IME + 1] << 8)) & 0x0001u) != 0;
++    }
++
+     // Raw register reads for the runtime's CPU IRQ entry path.
+     uint16_t ie()      const;
+     uint16_t if_reg()  const;
+diff --git a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
+index 72ca9ec..da73969 100644
+--- a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
++++ b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
+@@ -25,6 +25,7 @@
+ 
+ #include "audio_shadow.h"
+ #include "gba_m4a.h"
++#include "psram_alloc.h"
+ 
+ namespace gba {
+ 
+@@ -114,8 +115,15 @@ private:
+     uint64_t last_hook_cursor_ = 0;
+     uint8_t  reverb_ = 0;
+     uint8_t  dma_period_ = 7;
+-    std::vector<std::pair<float, float>> ring_ =
+-        std::vector<std::pair<float, float>>(kFrame * 16, {0.0f, 0.0f});
++    // ~137 KB of delay history. With VRAM/OAM/palette bound to on-chip SRAM
++    // the SRAM heap is only ~178 KB, so the default allocator returns NULL for
++    // this vector and the zero-fill faults at address 0 during bring-up.
++    // Serve it from the PSRAM arena, like GbaAudio's capture ring: it is
++    // touched only on the shadow render path, once per grid sample.
++    using RingSample = std::pair<float, float>;
++    std::vector<RingSample, PsramAllocator<RingSample>> ring_ =
++        std::vector<RingSample, PsramAllocator<RingSample>>(kFrame * 16,
++                                                           {0.0f, 0.0f});
+     std::size_t ring_pos_ = 0;
+     ShadowVerifier vf_{};
+     uint8_t  count_mode_ = 0;
 diff --git a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp b/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
 index d9d1604..b943dde 100644
 --- a/third_party/gbarecomp-main/src/gba/gba_ppu.cpp
@@ -1085,101 +1139,8 @@ index 69c2465..4b6c9ee 100644
      bool has_latched_fb_ = false;
  
      struct AffineLineState {
-diff --git a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
-index 72ca9ec..da73969 100644
---- a/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
-+++ b/third_party/gbarecomp-main/src/gba/mp2k_shadow.h
-@@ -25,6 +25,7 @@
- 
- #include "audio_shadow.h"
- #include "gba_m4a.h"
-+#include "psram_alloc.h"
- 
- namespace gba {
- 
-@@ -114,8 +115,15 @@ private:
-     uint64_t last_hook_cursor_ = 0;
-     uint8_t  reverb_ = 0;
-     uint8_t  dma_period_ = 7;
--    std::vector<std::pair<float, float>> ring_ =
--        std::vector<std::pair<float, float>>(kFrame * 16, {0.0f, 0.0f});
-+    // ~137 KB of delay history. With VRAM/OAM/palette bound to on-chip SRAM
-+    // the SRAM heap is only ~178 KB, so the default allocator returns NULL for
-+    // this vector and the zero-fill faults at address 0 during bring-up.
-+    // Serve it from the PSRAM arena, like GbaAudio's capture ring: it is
-+    // touched only on the shadow render path, once per grid sample.
-+    using RingSample = std::pair<float, float>;
-+    std::vector<RingSample, PsramAllocator<RingSample>> ring_ =
-+        std::vector<RingSample, PsramAllocator<RingSample>>(kFrame * 16,
-+                                                           {0.0f, 0.0f});
-     std::size_t ring_pos_ = 0;
-     ShadowVerifier vf_{};
-     uint8_t  count_mode_ = 0;
-diff --git b/third_party/gbarecomp-main/src/gba/psram_alloc.h b/third_party/gbarecomp-main/src/gba/psram_alloc.h
-new file mode 100644
-index 0000000..73749bd
---- /dev/null
-+++ b/third_party/gbarecomp-main/src/gba/psram_alloc.h
-@@ -0,0 +1,57 @@
-+// psram_alloc.h — allocator for large, low-traffic buffers.
-+//
-+// Bare-metal targets usually keep the RTOS heap in on-chip SRAM, which is far
-+// too small for the observability buffers the runtime keeps around (the audio
-+// capture ring alone is several MiB). With GBARECOMP_PSRAM_ALLOC those buffers
-+// are served from the board's external PSRAM instead, while hot buffers stay
-+// on the fast on-chip heap.
-+
-+#pragma once
-+
-+#include <cstddef>
-+#include <memory>
-+#include <new>
-+
-+#ifdef GBARECOMP_PSRAM_ALLOC
-+
-+extern "C" void *gba_psram_alloc(std::size_t size);
-+extern "C" void  gba_psram_free(void *ptr);
-+
-+namespace gba {
-+
-+// Bump allocator over the device PSRAM arena. Blocks are handed out once at
-+// bring-up and never returned, so deallocate() is a no-op.
-+template <typename T>
-+class PsramAllocator {
-+public:
-+    using value_type = T;
-+
-+    PsramAllocator() = default;
-+    template <typename U>
-+    PsramAllocator(const PsramAllocator<U>&) noexcept {}
-+
-+    T* allocate(std::size_t n) {
-+        void* p = gba_psram_alloc(n * sizeof(T));
-+        if (p == nullptr) throw std::bad_alloc();
-+        return static_cast<T*>(p);
-+    }
-+    void deallocate(T* p, std::size_t) noexcept { gba_psram_free(p); }
-+
-+    template <typename U>
-+    bool operator==(const PsramAllocator<U>&) const noexcept { return true; }
-+    template <typename U>
-+    bool operator!=(const PsramAllocator<U>&) const noexcept { return false; }
-+};
-+
-+}  // namespace gba
-+
-+#else
-+
-+namespace gba {
-+
-+template <typename T>
-+using PsramAllocator = std::allocator<T>;
-+
-+}  // namespace gba
-+
-+#endif  // GBARECOMP_PSRAM_ALLOC
 diff --git a/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp b/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
-index fa45091..0047177 100644
+index fa45091..21285b9 100644
 --- a/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
 +++ b/third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp
 @@ -30,7 +30,9 @@
@@ -1568,7 +1529,17 @@ index fa45091..0047177 100644
  extern "C" void runtime_tick(uint32_t cycles) {
      if (g_session_execution) { g_runtime_cycles += cycles; return; }
      // P6 shadow-tick: a healed shard's validation re-run only accumulates its
-@@ -830,9 +1031,22 @@ extern "C" void runtime_tick(uint32_t cycles) {
+@@ -821,7 +1022,9 @@ extern "C" void runtime_tick(uint32_t cycles) {
+     // instruction.
+     if (g_host_service_hook) account_host_service_instructions(1);
+ 
++#if !defined(GBARECOMP_TICK_LEAN)
+     cyc_probe("tick", cycles);
++#endif
+     g_runtime_cycles += cycles;
+     // Lazy device catch-up: advance the master clock every instruction (cheap),
+     // but materialize device state only when the next-event horizon is reached.
+@@ -830,17 +1033,39 @@ extern "C" void runtime_tick(uint32_t cycles) {
      g_pending_cycles += cycles;
      g_event_budget   -= static_cast<long long>(cycles);
      if (g_event_budget <= 0) {
@@ -1591,3 +1562,84 @@ index fa45091..0047177 100644
      }
  
      // A timed/FIFO DMA may have fired inside that flush; charge its stolen bus
+     // cycles (advancing the clock + devices) before the IRQ-eligibility check,
+     // so a DMA-end IRQ or a timer that overflowed during the steal is seen now.
++#if defined(GBARECOMP_TICK_LEAN)
++    // Same predicates as drain_dma_steal()'s first check and irq_pending(),
++    // tested inline: on the overwhelmingly common zero/no-IRQ path this drops
++    // two out-of-line calls per guest instruction without changing any state.
++    if (bus->io().pending_dma_steal_cycles() != 0) drain_dma_steal(bus, ppu);
++    const bool irq_pending = bus->io().irq_pending_inline();
++#else
+     drain_dma_steal(bus, ppu);
++    const bool irq_pending = bus->io().irq_pending();
++#endif
+ 
+-    if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
++    if (irq_pending && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
+         g_runtime_irq_from_halt = bus->io().halted() ? 1u : 0u;
+         if (bus->io().halted()) {
+             // Wake-from-HALT IRQ latency. The ARM7TDMI does not vector the
+diff --git a/third_party/gbarecomp-main/src/gba/psram_alloc.h b/third_party/gbarecomp-main/src/gba/psram_alloc.h
+new file mode 100644
+index 0000000..73749bd
+--- /dev/null
++++ b/third_party/gbarecomp-main/src/gba/psram_alloc.h
+@@ -0,0 +1,57 @@
++// psram_alloc.h — allocator for large, low-traffic buffers.
++//
++// Bare-metal targets usually keep the RTOS heap in on-chip SRAM, which is far
++// too small for the observability buffers the runtime keeps around (the audio
++// capture ring alone is several MiB). With GBARECOMP_PSRAM_ALLOC those buffers
++// are served from the board's external PSRAM instead, while hot buffers stay
++// on the fast on-chip heap.
++
++#pragma once
++
++#include <cstddef>
++#include <memory>
++#include <new>
++
++#ifdef GBARECOMP_PSRAM_ALLOC
++
++extern "C" void *gba_psram_alloc(std::size_t size);
++extern "C" void  gba_psram_free(void *ptr);
++
++namespace gba {
++
++// Bump allocator over the device PSRAM arena. Blocks are handed out once at
++// bring-up and never returned, so deallocate() is a no-op.
++template <typename T>
++class PsramAllocator {
++public:
++    using value_type = T;
++
++    PsramAllocator() = default;
++    template <typename U>
++    PsramAllocator(const PsramAllocator<U>&) noexcept {}
++
++    T* allocate(std::size_t n) {
++        void* p = gba_psram_alloc(n * sizeof(T));
++        if (p == nullptr) throw std::bad_alloc();
++        return static_cast<T*>(p);
++    }
++    void deallocate(T* p, std::size_t) noexcept { gba_psram_free(p); }
++
++    template <typename U>
++    bool operator==(const PsramAllocator<U>&) const noexcept { return true; }
++    template <typename U>
++    bool operator!=(const PsramAllocator<U>&) const noexcept { return false; }
++};
++
++}  // namespace gba
++
++#else
++
++namespace gba {
++
++template <typename T>
++using PsramAllocator = std::allocator<T>;
++
++}  // namespace gba
++
++#endif  // GBARECOMP_PSRAM_ALLOC

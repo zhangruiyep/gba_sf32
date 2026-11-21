@@ -16,7 +16,7 @@
 | `roms/` | **本地素材，不入库**。放 `gba_bios.bin` 和 `.gba` ROM（需解压后的裸 ROM，不是 zip） |
 | `out/` | **本地生成物，不入库**。`out/bios/` BIOS 重编译产物，`out/cart/` 原始 ROM 重编译产物，`out/cart_slim/` 瘦身版产物 |
 | `third_party/` | **本地第三方源码，不入库**。按第 3 节获取并打补丁 |
-| `patches/` | **入库**。`gbarecomp` 的累计移植补丁（`third_party/gbarecomp-main/src/` 的 9 个文件），拉代码后必须应用，见 3.1 |
+| `patches/` | **入库**。`gbarecomp` 的累计移植补丁（`third_party/gbarecomp-main/src/` 的 10 个文件），拉代码后必须应用，见 3.1 |
 | `build_sf32lb52-lchspi-ulp_hcpu/` | scons 构建产物（不入库），含 `main.bin`、`bootloader/`、`ftab/` |
 | `.trae/` | IDE / MCP 配置 |
 
@@ -64,7 +64,7 @@ git submodule update --init --recursive
 ### 3.1 应用本项目补丁（必做）
 
 上游 clone 得到的是原始 gbarecomp，本项目的移植改动（宿主桥接、PPU 优化、PSRAM 分配、音频静音开关等，
-共 `src/` 下 9 个文件）以累计补丁形式入库。**子模块 pin 好之后，在仓库根目录执行**：
+共 `src/` 下 10 个文件）以累计补丁形式入库。**子模块 pin 好之后，在仓库根目录执行**：
 
 ```powershell
 cd <repo>
