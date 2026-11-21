@@ -2,7 +2,7 @@
 
 把 gbarecomp（AOT 静态重编译 + Tier3 解释器兜底）移植到思澈 SF32LB52x 黄山派：Mario Kart Super Circuit 4 MB ROM 已真机运行、可操作，当前处于性能优化阶段。
 
-> 最后更新：2026-11-20
+> 最后更新：2026-11-21
 
 ## 0. 当前状态总览
 
@@ -16,11 +16,11 @@
 | Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch | ✅ 2026-11-13 出游戏画面；入口种子 `0x08000000`；9 个 miss PC 由 Tier3 自愈、累计 51 次后收敛，全程无 FATAL |
 | Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 去重） | 📋 候选归档，非阻塞（ROM 余 351 KB）；Tier3 已使补种子路线不再必要 |
 | Phase 3 | 音频 / 按键 / 存档 | 🔄 按键已跑通（触摸虚拟手柄 Start/A/十字键，11-17 验证）；音频与存档明确不做 |
-| Phase 4 | 性能优化 | 🔄 devtick 已收口（audio 静音，1258 → 728 ms/60f）；N1 探针已定论（C 段占 `bg` 78–90%），N3a（8bpp 零 run 跳过）、N3b（逐像素体瘦身，8bpp 层 C −27.7%）均已上机验证无回归，见 §5.2 |
+| Phase 4 | 性能优化 | 🔄 devtick 已收口（audio 静音，1258 → 728 ms/60f）；N1 探针已定论（C 段占 `bg` 78–90%），N3a（8bpp 零 run 跳过）、N3b（逐像素体瘦身，8bpp 层 C −27.7%）均已上机验证无回归；`haltX` 定论后 N2 取消、N5（AOT 寄存器提升）转正，见 §5.2 |
 
-**当前性能**（11-20，audio 静音后）：轻场景 7.0–8.2 s/60f（≈7.3–8.6 fps）；重场景（4 层 text BG 全屏 / WIN0+WIN1+OBJWIN）10.4 s/60f（≈5.8 fps，静音前 10.9–11.7 s）；赛道段 15.4–17.1 s/60f（**3.5–3.9 fps**，`disp` 占 65–74%）。目标已由 60 fps 修正为 **7 → 10 fps**——60 fps 在本平台不可达（天花板由 render 的 ≈89 ms/帧决定）。
+**当前性能**（11-21 `haltX` 口径）：轻场景 7.0–8.2 s/60f（≈7.3–8.6 fps）；重场景（4 层 text BG 全屏 / WIN0+WIN1+OBJWIN）10.4 s/60f（≈5.8 fps，静音前 10.9–11.7 s）；赛道段 15.7–17.1 s/60f（**3.5–3.8 fps**），构成为 **AOT 61% / render 27% / devtick 6% / pres 1%**。目标已由 60 fps 修正为 **7 → 10 fps**——60 fps 在本平台不可达（天花板由 render 的 ≈89 ms/帧决定）。
 
-**本轮改动状态**（2026-11-20 17:03 固件）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支与 N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`，`Binary size 16,372,156 B`）均已上机：8bpp 层 C 1446 → 1046（−27.7%），4bpp 无回归；行级窗口 mask 在 `7f40` 实测不命中（收益全来自指针提升 + 零索引），原 25% 目标作废，详见 §5.2。`bgOP`/`bgctl`/`bgSeg`（新分母）/`bgRun` 探针同批生效。**新增 `haltX` 探针**（`halt` 内 flush / body / scan + 反推 `disp_flush`，`16,372,468 B`）待烧录，用于把 `halt` 与 `disp` 里的渲染时间分离。
+**本轮改动状态**（2026-11-21 10:06 固件）：`gba_ppu.cpp` 的 N3a 8bpp 零 run 分支与 N3b 逐像素体瘦身（`GBARECOMP_PPU_BG_PIXEL_LEAN`，`Binary size 16,372,156 B`）均已上机：8bpp 层 C 1446 → 1046（−27.7%），4bpp 无回归；行级窗口 mask 在 `7f40` 实测不命中（收益全来自指针提升 + 零索引），原 25% 目标作废，详见 §5.2。`haltX` 探针（`16,372,468 B`）已上机并定论：赛道 `halt` 的 33% 是 render 借道，泵本体 `body` 仅 3.5% wall、`scan` 0.05% ⇒ **N2 取消、N5 转正**，详见 §5.2。
 
 **烧录**：`build_sf32lb52-lchspi-ulp_hcpu/uart_download.bat`，串口 **COM14**（CH340），三镜像 `ftab@0x12000000` / `bootloader@0x12010000` / `main@0x12020000`。**约定由用户本人执行烧录**，AI 只编译并给出命令。
 
@@ -265,12 +265,10 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 6. **口径修正（已改 `gba_device.cpp`）**：C 只累加真正进入像素循环的 run，打印却除以全部 runs，跳过率高的层被低估（r1 显示 164，真值 1141）；现按 `runs − skip` 归一，下一份日志以新口径为准。
 7. 已清理：`fetch bench`（XIP 取指 8 cyc/iter 已定论）。
 
-**N2 合并 devtick `rest` 的 4 次 `cycles_until_*`**（≈1.5%，低风险，可立即改）
+**N2 合并 devtick `rest` 的 4 次 `cycles_until_*`**（❌ 已取消，2026-11-21 `haltX` 定论）
 
-- `rest` 仍占 309 ms/60f（≈5.2 ms/帧），主体是每轮独立调用的 `cycles_until_next_*`（ppu / timer / sio，audio 已摘）。
-- 改法：让 `tick_devices()` 把本轮算出的「下一事件」直接交回预算，`recompute_event_budget()` 不再重算一遍；不改变事件顺序与时序语义。
-- 回退：单点宏开关（沿用 `GBARECOMP_*` 惯例）。
-- 验收：`devtick rest` 309 → ≤160 ms/60f，`wall` 不退化，`flush` 次数不变。
+- 原估 `rest` 309 ms/60f，但 `haltX` 实测泵内 next-event 扫描（`scan`）只占 **≈10 ms/60f（0.05% wall）**，`body` 也只 0.60 s（3.5%）。原 309 ms 里的大头是 `tick_devices` 在 HBlank 事件里触发的 render，不是 `cycles_until_*`。
+- 收益上限 = 0.17 ms/帧，**不足以抵消一次烧录与回归成本 ⇒ 不做**，本项不再跟踪。
 
 **N3 逐像素体治理**（按 N1 实测重写；原「4bpp nibble 批解码」判定为收益有限，降级并入 N3b）
 
@@ -303,7 +301,7 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 **赛道段复测（17:03 日志，17:08:26 后，N3b 固件）**
 
 - 17:08:33 进场过渡（`dispcnt 1f40`，无窗口，4 层 4bpp，r0 2,304,000 px 全不透明）：wall 7.70 s/60f，render 2890 ms（bg 1915，其中 r0 1659 ms = **173 cyc/px**），bgSeg r0 C=1270，objscan 仅 8。
-- 17:08:49 正式赛道（`dispcnt 3f40`，仅 WIN0）：wall **15.38 s/60f（3.9 fps）** = `disp` 9997（65%）+ `halt` 5155（33%）+ `pres` 181。`render` 4504 = `bg` 3170（r0 706 / r1 450 / r2 311 / r3 784）+ affine `a2` 892 + `out` 533 + `prep` 173；`disp` 内 AOT ≈3.6 s、`interp` 761（229 calls，65 kinsns）、`dma` 97；`memtot` 读 1009 + 写 442 = **1451 ms/60f（24 ms/帧、占总 wall 9%）**，为全日志最高。
+- 17:08:49 正式赛道（`dispcnt 3f40`，仅 WIN0）：wall **15.38 s/60f（3.9 fps）** = `disp` 9997（65%）+ `halt` 5155（33%）+ `pres` 181。`render` 4504 = `bg` 3170（r0 706 / r1 450 / r2 311 / r3 784）+ affine `a2` 892 + `out` 533 + `prep` 173；`disp` − `flush` 的 4368 ms 旧口径误读为 AOT，实际含 `interp` 761（229 calls，65 kinsns）与未知量的 `disp_flush`（21 日 haltX 复测为 1.1 s）；`dma` 97；`memtot` 读 1009 + 写 442 = **1451 ms/60f（24 ms/帧、占总 wall 9%）**，为全日志最高。
 - 两处新观察：① `disp calls` 3358/60f（≈56 次/帧）与 `interp` 761 ms 集中在含起跑特效的这一块，不能当稳态基线；② **`flush` 归属未定**——`render_scanline` 由 `tick_devices` 在 HBlank 事件里触发，落在哪个分支就记给哪个桶，所以 `halt` 5155 ms 里可能大半是 render，`disp` 9997 ms 里的 AOT 也未必是 ≈3.6 s。已加 `haltX` 探针（`halt` 内 flush 计时 + next-event 扫描计时 + 反推 `disp_flush`），见 N4。
 - 结论：赛道段可确定的只有 `render` 29%（4504 ms）与 `memtot` 9%；`disp`/`halt` 的 98% 拆分待 `haltX` 一次烧录定论。`bg` 逐层 C 1219–1359 与旧赛道块不可比（r0 覆盖率 851k vs 435k），继续压 `bg` 只剩个位数 ms/帧。
 
@@ -311,14 +309,34 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 
 - 11-20 日志后段（08:49 起）`dispatch miss` 累计升至 1872，`disp calls` 197 → 2010–3358/60f，`interp` 757 ms/60f，wall 14–17 s。
 - 判据：同帧 `bgL` 里两层全屏 4bpp 各 ≈1,385 ms（≈144 cyc/px）说明是 **render 变重**；只有 `interp` 占比明显上升才是 Tier3 回退。两者处置完全不同。
-- 17:03 日志新增两条待归因项：① **`flush` 落在 `halt` 还是 `disp` 未知**（`render_scanline` 在 `tick_devices` 的 HBlank 事件里触发），所以 `halt`/`disp` 不能直接读成「泵开销」/「AOT」。已加探针 `haltX 60f: flush / body / scan | disp_flush`（`src/gba_device.cpp`，每泵 3 次 DWT 读：next-event 扫描、`g_flush_cyc` 前后差、泵总时长；`disp_flush = flush − halt.flush`），固件 `16,372,468 B` 待烧录。② **窗口开启本身的逐像素成本**：同工作量 4bpp 满不透明层 C 1239（`1e40`）→ 1457 / 1623（`7f40`），即 +27~48 cyc/px，属 N3c 可打目标。
+- 17:03 日志新增两条待归因项：① **`flush` 落在 `halt` 还是 `disp` 未知**（`render_scanline` 在 `tick_devices` 的 HBlank 事件里触发），所以 `halt`/`disp` 不能直接读成「泵开销」/「AOT」。已加探针 `haltX 60f: flush / body / scan | disp_flush`（`src/gba_device.cpp`，每泵 3 次 DWT 读：next-event 扫描、`g_flush_cyc` 前后差、泵总时长；`disp_flush = flush − halt.flush`），固件 `16,372,468 B` **已上机并定论，走判据 A**（见下）。② **窗口开启本身的逐像素成本**：同工作量 4bpp 满不透明层 C 1239（`1e40`）→ 1457 / 1623（`7f40`），即 +27~48 cyc/px，属 N3c 可打目标。
 - 判据（`haltX` 结果三分支）：A) `halt.flush` ≈ `render + devtick + dma` 且 `body` ≈ `scan` ≈ 几十 ms ⇒ 渲染是在 HALT 期间借道完成，赛道真实主体是 `disp` 里的 AOT ⇒ 立项 N5（寄存器提升）；B) `disp_flush` 数百 ms 以上、`body` 明显 >0 ⇒ `disp` 混入了渲染，先修账再谈优化；C) `body` 上千 ms 且与 `render` 无关 ⇒ 泵内确有大头（事件队列 / `runtime_tick` 记账），按桶继续细分。
 - 产出：一条归因结论。若确为回退主导，先算补种子会让派发表 + 代码各涨多少（NOR 只剩 343 KB），再决定是否立项。
 
-**N5 Phase 2-E E1 寄存器提升**（唯一能压 AOT ~42%，条件立项）
+**haltX 首测结论（2026-11-21 10:06 日志，赛道在 10:09:39 后）**——已定论，走判据 A
 
-- 前提：N1–N3 落地后仍差 ≥2 fps，且接受「改 codegen + 重新生成 ROM + 全量回归」。
-- 目标：把 `g_cpu.R[]` 的常用寄存器提升成宿主局部变量，在 300–400 cyc/指令 上砍 20–30%。
+- 探针自洽：`halt.flush + body + scan ≈ halt`；标题/菜单段 `body` 72–200 ms、`scan` 7–18 ms、`disp_flush` 59–556 ms ⇒ 该段 `halt` 基本就是 render 借道。
+- 赛道稳态（10:11:17–10:12:24，`dispcnt 1f40` 无窗口）：wall 15.7–17.1 s/60f、`disp` 11.1–12.8 s、`halt` 4.2–4.4 s；`halt.flush` 3.6–3.8 s、`body` **0.60–0.61 s**、`scan` ≈10 ms、`disp_flush` 1.8–2.3 s。
+- 取 10:12:24 块（wall 17145、render 4683、devtick 1023、dma 98、flush 5847、halt.flush 3557、disp_flush 2289、interp 67、memtot 1816）拆分：
+  - `halt` 4161 = render ≈2794 + devtick ≈600 + dma ≈60 + **body 604** + scan 8；
+  - `disp` 12772 = **AOT ≈10.4 s** + interp 67 + render ≈1889 + devtick ≈400；
+  - ⇒ 赛道真实构成 **AOT 61%（≈174 ms/帧）/ render 27% / devtick 6% / pres 1%**；`memtot` 1.82 s = AOT 的 17.5%；逐层 `bgL`：r0 372/435k（205 cyc/px）、r1 411/423k（233）、r2 439/602k（175）、r3 847/1,065,600（191）、affine a2 919/1,238,400（178）。
+- 三条结论：
+  1. `halt` 的 33% 不是泵开销，而是 render 借道；`body` 只占 wall 3.5%、`scan` 0.05%，**N2（合并 `cycles_until_*`）收益上限 ≈1 ms/帧，取消**。17:03 日志的「232 µs/泵」是错误算法（把 render 当成泵本体），已废弃。
+  2. 赛道主瓶颈是 **AOT 指令执行 ≈174 ms/帧（61%）**；`interp` 仅 67 ms、`dispatch miss` 累计 3,280 无影响 ⇒ 提 fps 必须动 AOT ⇒ **N5 转正**（不再是条件项）。
+  3. 渲染侧只剩 27%，继续投入上限 ≈+1 fps；N3c 降为顺手项。4bpp 满不透明层 C 1351（10:12:24）与旧赛道块 1334 持平，符合「无窗口场景只吃指针提升」的预期。
+
+**N5 Phase 2-E E1 寄存器提升**（✅ 已转正，2026-11-21；唯一能压 AOT ≈174 ms/帧的主项）
+
+- 立项依据（`haltX` 判据 A）：赛道稳态 wall 15.7–17.1 s/60f 中 **AOT ≈10.4 s（61%）**、render 27%、devtick 6%、pres 1%；`interp` 67 ms、`dispatch miss` 累计 3,280 ⇒ 不是 Tier3 回退，是纯 AOT 每指令成本。
+- 现状成本：每 guest 指令 300–400 宿主周期，构成是 `g_cpu.R[]` 全内存访存 + 派发二分查找（12 B/条、2 MB 常驻 NOR）+ 每指令 `runtime_tick` 调用链；codegen 无寄存器分配。
+- 目标：把 `g_cpu.R[]` 的常用寄存器提升成宿主局部变量，在 300–400 cyc/指令 上砍 20–30%；赛道 AOT ≈174 ms/帧 ⇒ 目标 ≈120–140 ms/帧（+0.6–0.9 fps），并把轻场景的 AOT ≈54 ms/帧同比例压缩。
+- 前置成本：改 codegen + 重新生成 ROM（`.text` 12.68 MB 需重新评估膨胀）+ 全量回归；NOR 只剩 343 KB，若 codegen 膨胀超预算需同步做 E2（派发表压缩）。
+- 拆步（按风险从低到高，一次只烧一处）：
+  1. **入口短路**（低风险）：`memtot` 占 AOT 17.5%（1.82 s/60f），先砍 `bus_read_*/bus_write_*` 的 IO 判定 / trace / resync 固定开销，不碰 codegen。
+  2. **`runtime_tick` 内联化**（中风险）：把每指令的周期记账压成几条内联指令（当前是不可内联调用）。
+  3. **codegen 寄存器提升**（高风险）：`R0–R15` 中热寄存器驻留宿主变量，只在跨块边界回写。
+- 回退：每一步独立宏开关（`GBARECOMP_*`），codegen 改动需保留旧生成路径（`--no-regalloc`）以便对拍。
 
 **N6 低优先待补**
 
