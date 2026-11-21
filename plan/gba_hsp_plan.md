@@ -14,9 +14,9 @@
 | Phase 2-B | 显示后端：中央 240×160 RGB565 | ✅ 完成；当时的「滚动彩条」实为 165×15 坐标 bug，已在 2-C 修复 |
 | Phase 2-C | runtime 移植到 SiFli HAL | ✅ 真机验证：BIOS 从 reset vector 跑到空闲态，236 个函数入口，无 fault；送屏几何修复后居中 240×160 |
 | Phase 2-D | 真实 ROM 接入：TF 卡读入 PSRAM + cart dispatch | ✅ 2026-11-13 出游戏画面；入口种子 `0x08000000`；9 个 miss PC 由 Tier3 自愈、累计 51 次后收敛，全程无 FATAL |
-| Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 去重） | 📋 候选归档，非阻塞（ROM 余 351 KB）；Tier3 已使补种子路线不再必要 |
+| Phase 2-E | 容量优化（E1 寄存器提升 / E2 派发表压缩 / E3 去重） | 📋 候选归档，非阻塞（ROM 余 ≈235 KiB）；Tier3 已使补种子路线不再必要 |
 | Phase 3 | 音频 / 按键 / 存档 | 🔄 按键已跑通（触摸虚拟手柄 Start/A/十字键，11-17 验证）；音频与存档明确不做 |
-| Phase 4 | 性能优化 | 🔄 devtick 已收口（audio 静音，1258 → 728 ms/60f）；N1 探针已定论（C 段占 `bg` 78–90%），N3a（8bpp 零 run 跳过）、N3b（逐像素体瘦身，8bpp 层 C −27.7%）均已上机验证无回归；`haltX` 定论后 N2 取消、N5（AOT 每指令成本）转正；N5 的寄存器提升/强制内联因 ROM 只剩 ~343 KB 被实测否决，改为 callee 内部瘦身，见 §5.2 |
+| Phase 4 | 性能优化 | 🔄 devtick 已收口（audio 静音，1258 → 728 ms/60f）；N1 探针已定论（C 段占 `bg` 78–90%），N3a（8bpp 零 run 跳过）、N3b（逐像素体瘦身，8bpp 层 C −27.7%）均已上机验证无回归；`haltX` 定论后 N2 取消、N5（AOT 每指令成本）转正；N5 的寄存器提升/强制内联因 ROM 只剩 ≈235 KiB 被实测否决，改为 callee 内部瘦身；第 1 步 `GBARECOMP_BUS_FASTPATH`（RAM/ROM 访存入口短路）已实现、待上机，见 §5.2 |
 
 **当前性能**（11-21 `haltX` 口径）：轻场景 7.0–8.2 s/60f（≈7.3–8.6 fps）；重场景（4 层 text BG 全屏 / WIN0+WIN1+OBJWIN）10.4 s/60f（≈5.8 fps，静音前 10.9–11.7 s）；赛道段 15.7–17.1 s/60f（**3.5–3.8 fps**），构成为 **AOT 61% / render 27% / devtick 6% / pres 1%**。目标已由 60 fps 修正为 **7 → 10 fps**——60 fps 在本平台不可达（天花板由 render 的 ≈89 ms/帧决定）。
 
@@ -216,7 +216,7 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 
 ### 3.4 当前镜像尺寸
 
-`main.bin` **16,371,172 B**，ROM 分区已用 **16,261,652 / 16,613,376 B（余 351,724 B）**，RAM **228,700 / 523,264 B**；仅剩既有的 `g_force_interp` 与 RWX 段告警。symbol_map.cpp（519 KB）不链接，串口 trace 只显示地址（2-E 若要恢复函数名，用区间编码压到 ~120 KB）。
+`main.bin` **16,372,988 B**（2026-11-21 N5-1 固件；`.text 16,360,356 + .data 12,628 = 16,372,984 B`），ROM 分区 `0x00FD8000 = 16,613,376 B` ⇒ **余量 240,392 B（≈235 KiB）**；RAM **228,700 / 523,264 B**；仅剩既有的 `g_force_interp` 与 RWX 段告警。symbol_map.cpp（519 KB）不链接，串口 trace 只显示地址（2-E 若要恢复函数名，用区间编码压到 ~120 KB）。
 
 ## 4. 已完成能力清单
 
@@ -311,7 +311,7 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 - 判据：同帧 `bgL` 里两层全屏 4bpp 各 ≈1,385 ms（≈144 cyc/px）说明是 **render 变重**；只有 `interp` 占比明显上升才是 Tier3 回退。两者处置完全不同。
 - 17:03 日志新增两条待归因项：① **`flush` 落在 `halt` 还是 `disp` 未知**（`render_scanline` 在 `tick_devices` 的 HBlank 事件里触发），所以 `halt`/`disp` 不能直接读成「泵开销」/「AOT」。已加探针 `haltX 60f: flush / body / scan | disp_flush`（`src/gba_device.cpp`，每泵 3 次 DWT 读：next-event 扫描、`g_flush_cyc` 前后差、泵总时长；`disp_flush = flush − halt.flush`），固件 `16,372,468 B` **已上机并定论，走判据 A**（见下）。② **窗口开启本身的逐像素成本**：同工作量 4bpp 满不透明层 C 1239（`1e40`）→ 1457 / 1623（`7f40`），即 +27~48 cyc/px，属 N3c 可打目标。
 - 判据（`haltX` 结果三分支）：A) `halt.flush` ≈ `render + devtick + dma` 且 `body` ≈ `scan` ≈ 几十 ms ⇒ 渲染是在 HALT 期间借道完成，赛道真实主体是 `disp` 里的 AOT ⇒ 立项 N5（寄存器提升）；B) `disp_flush` 数百 ms 以上、`body` 明显 >0 ⇒ `disp` 混入了渲染，先修账再谈优化；C) `body` 上千 ms 且与 `render` 无关 ⇒ 泵内确有大头（事件队列 / `runtime_tick` 记账），按桶继续细分。
-- 产出：一条归因结论。若确为回退主导，先算补种子会让派发表 + 代码各涨多少（NOR 只剩 343 KB），再决定是否立项。
+- 产出：一条归因结论。若确为回退主导，先算补种子会让派发表 + 代码各涨多少（NOR 只剩 ≈235 KiB），再决定是否立项。
 
 **haltX 首测结论（2026-11-21 10:06 日志，赛道在 10:09:39 后）**——已定论，走判据 A
 
@@ -333,11 +333,11 @@ PC 端重编译：VS DevShell + Ninja 构建 `gba_recompile`（cmake 3.30 无 VS
 - **实测反证（2026-11-21，本轮做掉的成本区）**：
   1. `objdump -d --disassemble=gf_tfunc_080002CC` 显示 `g_cpu` 基址已由 GCC 提升到寄存器（`str r3,[r4,#60]` 一类），即「`uint32_t *const R = g_cpu.R;`」式指针提升收益 ≈0，**不做了**。
   2. 真正的每指令开销是 2–3 个 `BL`（`cpsr_c`、`arm_set_nzc_logic`、`runtime_tick`），约 54 B 代码/guest 指令；生成 `.text` 合计 12.68 MB、全 ROM 有 232,206 处 `runtime_tick(` 调用点。
-  3. 尝试把 `cpsr_*` / `arm_set_nz*` 改成 `always_inline`（开关 `GBARECOMP_AOT_INLINE_FLAGS`，已回退）：链接直接报 `region 'ROM' overflowed by 1,577,852 bytes`。**结论：ROM 主分区只剩 ~343 KB，任何 per-call-site 代码增长都不可接受**；凡是要在 232k 个调用点各加几字节的方案一律否决。
+  3. 尝试把 `cpsr_*` / `arm_set_nz*` 改成 `always_inline`（开关 `GBARECOMP_AOT_INLINE_FLAGS`，已回退）：链接直接报 `region 'ROM' overflowed by 1,577,852 bytes`。**结论：ROM 主分区只剩 240,392 B（≈235 KiB），任何 per-call-site 代码增长都不可接受**；凡是要在 232k 个调用点各加几字节的方案一律否决。
 - 目标（修正）：只改**被调用函数内部**（调用点代码体积不增），在 300–400 cyc/指令 上砍 20–30%；赛道 AOT ≈174 ms/帧 ⇒ 目标 ≈120–140 ms/帧（+0.6–0.9 fps）。
 - 拆步（按收益/风险排序，一次只烧一处，各自独立宏开关）：
   1. **`bus_read_*/bus_write_*` 入口短路**（低风险、收益最确定）：`memtot` 占 AOT 17.5%（1.82 s/60f，即 ≈30 ms/帧），砍入口的 IO 判定 / trace / resync 固定开销；不碰 codegen，不动 ROM 体积。
-     **✅ 已实现（2026-11-21，开关 `GBARECOMP_BUS_FASTPATH`，待上机）**：搬进 [`runtime_bus_bridge.cpp`](../third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp) 的 6 个 `bus_read_u8/u16/u32`、`bus_write_u8/u16/u32` 入口。EWRAM/IWRAM/ROM（0x08–0x0D，含 4 MB 以上的镜像）直接走 `read_memory` / `write_memory` + epoch，跳过 `is_io_addr`/`is_idle_safe_read` 双判、`note_mmio_read`、`sync_bios_access`（2 次 store）、`apply_bus_read_override`、`trace_unmapped_read`（out-of-line 调用）以及写侧的 `runtime_resync_horizon`。位等价前提：①GPIO 窗口 0x0C0–0x0CB 留在慢路径；②BIOS（`addr < 0x4000`）留在慢路径（`bios_access_enabled_` 依赖 PC 锁存）；③`g_runtime_bus_read_override` 非空时整体回退慢路径；④写路径 epoch 自增顺序不变。ROM 读不消费 `open_bus_pc_`（`gba_bus.cpp` ROM 分支只用 `matrix_`/`rom_`/GPIO），故跳过 `note_pc` 安全。构建验证：`Binary size 16,372,988 B`（+520 B），ROM 余量 ~343 KB 不变。预期收益上限 ≈ memtot 的份额，实测以 `memrd`/`memwr` 与赛道 fps 为准。
+     **✅ 已实现（2026-11-21，开关 `GBARECOMP_BUS_FASTPATH`，待上机）**：搬进 [`runtime_bus_bridge.cpp`](../third_party/gbarecomp-main/src/runtime/runtime_bus_bridge.cpp) 的 6 个 `bus_read_u8/u16/u32`、`bus_write_u8/u16/u32` 入口。EWRAM/IWRAM/ROM（0x08–0x0D，含 4 MB 以上的镜像）直接走 `read_memory` / `write_memory` + epoch，跳过 `is_io_addr`/`is_idle_safe_read` 双判、`note_mmio_read`、`sync_bios_access`（2 次 store）、`apply_bus_read_override`、`trace_unmapped_read`（out-of-line 调用）以及写侧的 `runtime_resync_horizon`。位等价前提：①GPIO 窗口 0x0C0–0x0CB 留在慢路径；②BIOS（`addr < 0x4000`）留在慢路径（`bios_access_enabled_` 依赖 PC 锁存）；③`g_runtime_bus_read_override` 非空时整体回退慢路径；④写路径 epoch 自增顺序不变。ROM 读不消费 `open_bus_pc_`（`gba_bus.cpp` ROM 分支只用 `matrix_`/`rom_`/GPIO），故跳过 `note_pc` 安全。构建验证：`Binary size 16,372,988 B`（+520 B），ROM 余量 ≈235 KiB。预期收益上限 ≈ memtot 的份额，实测以 `memrd`/`memwr` 与赛道 fps 为准。
   2. **`runtime_tick` 内部瘦身**（低中风险）：现状每指令都做 `g_host_service_hook` 检查、`cyc_probe` 记账、`drain_dma_steal`、IRQ 判定；改成慢路径外置 / 预算窗口内批量，函数体积可持平。
   3. **codegen 去掉冗余 `R[15]` 存储**（中风险，能换 ROM 余量）：每 guest 指令前后各写一次 `g_cpu.R[15]`，可由 codegen 只在分支/异常边界写；需重新生成 ROM 并对拍，**先减体积再谈其它 codegen 改动**。
   4. 若 1–3 仍不足，才考虑寄存器分配式 codegen（需先腾出至少 1 MB ROM 余量，或同步做 E2 派发表压缩）。
